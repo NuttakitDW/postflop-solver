@@ -4,6 +4,9 @@ use crate::interface::*;
 use crate::utility::*;
 use std::mem::{self, MaybeUninit};
 
+#[cfg(feature = "abstraction")]
+use crate::abstraction::*;
+
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
@@ -43,6 +46,12 @@ impl Game for PostFlopGame {
         player: usize,
         cfreach: &[f32],
     ) {
+        #[cfg(feature = "abstraction")]
+        if self.abstraction_enabled {
+            self.evaluate_abstracted(result, node, player, cfreach);
+            return;
+        }
+
         if self.bunching_num_dead_cards == 0 {
             self.evaluate_internal(result, node, player, cfreach);
         } else {
@@ -113,6 +122,22 @@ impl Game for PostFlopGame {
     #[inline]
     fn is_compression_enabled(&self) -> bool {
         self.is_compression_enabled
+    }
+
+    #[cfg(feature = "abstraction")]
+    #[inline]
+    fn is_abstraction_enabled(&self) -> bool {
+        self.abstraction_enabled
+    }
+
+    #[cfg(feature = "abstraction")]
+    #[inline]
+    fn num_solve_units(&self, player: usize) -> usize {
+        if self.abstraction_enabled {
+            self.num_buckets(player)
+        } else {
+            self.num_private_hands(player)
+        }
     }
 }
 
@@ -1446,5 +1471,360 @@ impl PostFlopGame {
                 ip_counter += num_bytes * node.num_elements_ip as usize;
             }
         }
+    }
+}
+
+// Abstraction-related methods
+#[cfg(feature = "abstraction")]
+impl PostFlopGame {
+    /// Enables hand abstraction with the given configuration.
+    ///
+    /// This must be called after `update_config` but before `allocate_memory`.
+    /// When abstraction is enabled, the solver operates on buckets instead of
+    /// individual hands, significantly reducing memory usage.
+    ///
+    /// # Arguments
+    /// * `config` - The abstraction configuration specifying number of buckets,
+    ///   EHS samples, and bucketing method.
+    ///
+    /// # Returns
+    /// * `Ok(())` if abstraction was successfully enabled
+    /// * `Err(String)` if abstraction cannot be enabled (e.g., memory already allocated)
+    pub fn enable_abstraction(&mut self, config: AbstractionConfig) -> Result<(), String> {
+        if self.state <= State::Uninitialized {
+            return Err("Game is not successfully initialized".to_string());
+        }
+
+        if self.state >= State::MemoryAllocated {
+            return Err("Cannot enable abstraction after memory allocation".to_string());
+        }
+
+        self.abstraction_enabled = true;
+        self.abstraction_data = Some(AbstractionData::new(config));
+
+        // Compute EHS and create bucket mappings for all relevant boards
+        self.compute_abstraction_data()?;
+
+        // Recalculate storage requirements using bucket counts
+        self.recalculate_storage_for_buckets();
+
+        Ok(())
+    }
+
+    /// Returns whether hand abstraction is enabled.
+    #[inline]
+    pub fn is_abstraction_enabled(&self) -> bool {
+        self.abstraction_enabled
+    }
+
+    /// Returns the abstraction data if abstraction is enabled.
+    #[inline]
+    pub fn abstraction_data(&self) -> Option<&AbstractionData> {
+        self.abstraction_data.as_ref()
+    }
+
+    /// Returns the number of buckets for the given player.
+    ///
+    /// If abstraction is not enabled, returns the number of private hands.
+    #[inline]
+    pub fn num_buckets(&self, player: usize) -> usize {
+        if !self.abstraction_enabled {
+            return self.num_private_hands(player);
+        }
+
+        self.abstraction_data
+            .as_ref()
+            .map(|d| d.num_buckets[player])
+            .unwrap_or(self.num_private_hands(player))
+    }
+
+    /// Returns the number of solve units (buckets if abstraction enabled, hands otherwise).
+    #[inline]
+    pub fn num_solve_units(&self, player: usize) -> usize {
+        if self.abstraction_enabled {
+            self.num_buckets(player)
+        } else {
+            self.num_private_hands(player)
+        }
+    }
+
+    /// Computes EHS values and creates bucket mappings for all boards.
+    fn compute_abstraction_data(&mut self) -> Result<(), String> {
+        // Extract config first to avoid borrow issues
+        let config = self.abstraction_data.as_ref().unwrap().config.clone();
+
+        // Extract all needed data from self before mutating abstraction_data
+        let flop = self.card_config.flop;
+        let flop_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
+        let card_turn = self.card_config.turn;
+        let card_river = self.card_config.river;
+        let isomorphism_card_turn = self.isomorphism_card_turn.clone();
+        let isomorphism_card_river = self.isomorphism_card_river.clone();
+
+        // Clone player data
+        let private_cards = self.private_cards.clone();
+        let initial_weights = self.initial_weights.clone();
+        let num_hands = [private_cards[0].len(), private_cards[1].len()];
+
+        // Compute for each player
+        for player in 0..2 {
+            let player_cards = &private_cards[player];
+            let weights = &initial_weights[player];
+
+            // Flop buckets (if starting from flop)
+            if card_turn == NOT_DEALT {
+                let ehs_values = compute_all_ehs(
+                    player_cards,
+                    &flop,
+                    config.ehs_samples,
+                    config.seed,
+                );
+
+                let mapping = create_bucket_mapping(
+                    &ehs_values,
+                    weights,
+                    config.num_buckets[0],
+                    config.use_percentile_bucketing,
+                );
+
+                self.abstraction_data.as_mut().unwrap().flop_buckets[player] = Some(mapping);
+            }
+
+            // Turn buckets
+            if card_river == NOT_DEALT {
+                for turn in 0u8..52 {
+                    if (1 << turn) & flop_mask != 0 {
+                        continue;
+                    }
+                    if card_turn != NOT_DEALT && card_turn != turn {
+                        continue;
+                    }
+
+                    // Skip isomorphic turns (we'll handle them via swap)
+                    if isomorphism_card_turn.contains(&turn) {
+                        continue;
+                    }
+
+                    let board = vec![flop[0], flop[1], flop[2], turn];
+
+                    // Filter hands that don't conflict with turn
+                    let valid_hands: Vec<(Card, Card)> = player_cards
+                        .iter()
+                        .filter(|&&(c1, c2)| c1 != turn && c2 != turn)
+                        .copied()
+                        .collect();
+
+                    if valid_hands.is_empty() {
+                        continue;
+                    }
+
+                    let ehs_values = compute_all_ehs(
+                        &valid_hands,
+                        &board,
+                        config.ehs_samples,
+                        config.seed.wrapping_add(turn as u64),
+                    );
+
+                    // Create mapping for all hands (invalid hands get bucket 0)
+                    let mut full_ehs = vec![5000u16; num_hands[player]]; // Default to middle bucket
+                    let mut valid_idx = 0;
+                    for (i, &(c1, c2)) in player_cards.iter().enumerate() {
+                        if c1 != turn && c2 != turn {
+                            full_ehs[i] = ehs_values[valid_idx];
+                            valid_idx += 1;
+                        }
+                    }
+
+                    let mapping = create_bucket_mapping(
+                        &full_ehs,
+                        weights,
+                        config.num_buckets[0],
+                        config.use_percentile_bucketing,
+                    );
+
+                    self.abstraction_data.as_mut().unwrap().turn_buckets[turn as usize][player] = Some(mapping);
+                }
+            }
+
+            // River buckets
+            for turn in 0u8..52 {
+                if (1 << turn) & flop_mask != 0 {
+                    continue;
+                }
+                if card_turn != NOT_DEALT && card_turn != turn {
+                    continue;
+                }
+                if isomorphism_card_turn.contains(&turn) {
+                    continue;
+                }
+
+                let turn_mask = flop_mask | (1 << turn);
+
+                for river in 0u8..52 {
+                    if (1 << river) & turn_mask != 0 {
+                        continue;
+                    }
+                    if card_river != NOT_DEALT && card_river != river {
+                        continue;
+                    }
+                    if isomorphism_card_river[turn as usize & 3].contains(&river) {
+                        continue;
+                    }
+
+                    let board = vec![flop[0], flop[1], flop[2], turn, river];
+                    let board_mask = turn_mask | (1 << river);
+
+                    // Filter hands that don't conflict with board
+                    let valid_hands: Vec<(Card, Card)> = player_cards
+                        .iter()
+                        .filter(|&&(c1, c2)| {
+                            let hand_mask: u64 = (1 << c1) | (1 << c2);
+                            hand_mask & board_mask == 0
+                        })
+                        .copied()
+                        .collect();
+
+                    if valid_hands.is_empty() {
+                        continue;
+                    }
+
+                    let ehs_values = compute_all_ehs(
+                        &valid_hands,
+                        &board,
+                        config.ehs_samples,
+                        config.seed.wrapping_add((turn as u64) << 8).wrapping_add(river as u64),
+                    );
+
+                    // Create mapping for all hands
+                    let mut full_ehs = vec![5000u16; num_hands[player]];
+                    let mut valid_idx = 0;
+                    for (i, &(c1, c2)) in player_cards.iter().enumerate() {
+                        let hand_mask: u64 = (1 << c1) | (1 << c2);
+                        if hand_mask & board_mask == 0 {
+                            full_ehs[i] = ehs_values[valid_idx];
+                            valid_idx += 1;
+                        }
+                    }
+
+                    let mapping = create_bucket_mapping(
+                        &full_ehs,
+                        weights,
+                        config.num_buckets[1],
+                        config.use_percentile_bucketing,
+                    );
+
+                    let pair_index = card_pair_to_index(turn, river);
+                    self.abstraction_data.as_mut().unwrap().river_buckets[pair_index][player] = Some(mapping);
+                }
+            }
+        }
+
+        // Set the bucket counts
+        let data = self.abstraction_data.as_mut().unwrap();
+        data.num_buckets = [config.num_buckets[0], config.num_buckets[0]];
+
+        Ok(())
+    }
+
+    /// Recalculates storage requirements using bucket counts instead of hand counts.
+    fn recalculate_storage_for_buckets(&mut self) {
+        if !self.abstraction_enabled {
+            return;
+        }
+
+        let num_buckets = self.abstraction_data.as_ref().unwrap().num_buckets;
+
+        // Recalculate num_storage by iterating through all nodes
+        let mut new_num_storage = 0u64;
+        let mut new_num_storage_ip = 0u64;
+        let mut new_num_storage_chance = 0u64;
+
+        for node_ref in &self.node_arena {
+            let mut node = node_ref.lock();
+
+            if node.is_terminal() {
+                continue;
+            }
+
+            if node.is_chance() {
+                // Chance nodes store cfvalues for one player
+                let player = node.cfvalue_storage_player();
+                if let Some(p) = player {
+                    let new_elements = num_buckets[p];
+                    node.num_elements = new_elements as u32;
+                    new_num_storage_chance += new_elements as u64;
+                }
+            } else {
+                // Action nodes store strategy/regrets for the acting player
+                let player = node.player as usize;
+                let new_elements = node.num_actions() * num_buckets[player];
+                node.num_elements = new_elements as u32;
+                new_num_storage += new_elements as u64;
+
+                // IP cfvalues storage
+                if node.num_elements_ip > 0 {
+                    let new_ip_elements = num_buckets[PLAYER_IP as usize];
+                    node.num_elements_ip = new_ip_elements as u16;
+                    new_num_storage_ip += new_ip_elements as u64;
+                }
+            }
+        }
+
+        self.num_storage = new_num_storage;
+        self.num_storage_ip = new_num_storage_ip;
+        self.num_storage_chance = new_num_storage_chance;
+    }
+
+    /// Expands bucket-level reach probabilities to hand level.
+    pub fn expand_bucket_cfreach(
+        &self,
+        bucket_cfreach: &[f32],
+        player: usize,
+        turn: Card,
+        river: Card,
+    ) -> Vec<f32> {
+        let num_hands = self.num_private_hands(player);
+
+        if !self.abstraction_enabled {
+            return bucket_cfreach.to_vec();
+        }
+
+        let data = match &self.abstraction_data {
+            Some(d) => d,
+            None => return bucket_cfreach.to_vec(),
+        };
+
+        let mapping = match data.get_mapping(player, turn, river) {
+            Some(m) => m,
+            None => return bucket_cfreach.to_vec(),
+        };
+
+        expand_bucket_to_hands(bucket_cfreach, mapping, num_hands)
+    }
+
+    /// Aggregates hand-level values to bucket level.
+    pub fn aggregate_to_buckets(
+        &self,
+        hand_values: &[f32],
+        hand_weights: &[f32],
+        player: usize,
+        turn: Card,
+        river: Card,
+    ) -> Vec<f32> {
+        if !self.abstraction_enabled {
+            return hand_values.to_vec();
+        }
+
+        let data = match &self.abstraction_data {
+            Some(d) => d,
+            None => return hand_values.to_vec(),
+        };
+
+        let mapping = match data.get_mapping(player, turn, river) {
+            Some(m) => m,
+            None => return hand_values.to_vec(),
+        };
+
+        aggregate_hands_to_buckets(hand_values, hand_weights, mapping)
     }
 }

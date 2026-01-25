@@ -77,6 +77,22 @@ pub trait Game: Send + Sync {
     fn is_compression_enabled(&self) -> bool {
         false
     }
+
+    /// Returns whether abstraction (hand bucketing) is enabled.
+    #[doc(hidden)]
+    #[cfg(feature = "abstraction")]
+    fn is_abstraction_enabled(&self) -> bool {
+        false
+    }
+
+    /// Returns the number of solve units (buckets if abstraction enabled, hands otherwise).
+    ///
+    /// This is used by the solver to determine array sizes and iteration counts.
+    #[doc(hidden)]
+    #[cfg(feature = "abstraction")]
+    fn num_solve_units(&self, player: usize) -> usize {
+        self.num_private_hands(player)
+    }
 }
 
 /// The trait representing a node in game tree.

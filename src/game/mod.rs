@@ -14,6 +14,9 @@ use crate::card::*;
 use crate::mutex_like::*;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "abstraction")]
+use crate::abstraction::*;
+
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
 
@@ -78,6 +81,12 @@ pub struct PostFlopGame {
     bunching_num_river: [Vec<Vec<usize>>; 2],
     bunching_coef_flop: [Vec<usize>; 2],
     bunching_coef_turn: [Vec<Vec<usize>>; 2],
+
+    // abstraction (hand bucketing)
+    #[cfg(feature = "abstraction")]
+    abstraction_enabled: bool,
+    #[cfg(feature = "abstraction")]
+    abstraction_data: Option<AbstractionData>,
 
     // store options
     storage_mode: BoardState,

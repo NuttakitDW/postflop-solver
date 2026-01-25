@@ -32,6 +32,10 @@
 //! [Discounted CFR]: https://arxiv.org/abs/1809.04040
 //!
 //! # Crate features
+//! - `abstraction`: Enables hand abstraction (bucketing) for memory-efficient solving.
+//!   Groups similar hands into buckets based on Expected Hand Strength (EHS),
+//!   reducing memory usage by 3-6x at the cost of some strategic accuracy.
+//!   Disabled by default.
 //! - `bincode`: Uses [bincode] crate (2.0.0-rc.3) to serialize and deserialize the `PostFlopGame` struct.
 //!   This feature is required to save and load the game tree.
 //!   Enabled by default.
@@ -56,6 +60,9 @@
 #[cfg(feature = "custom-alloc")]
 mod alloc;
 
+#[cfg(feature = "abstraction")]
+mod abstraction;
+
 #[cfg(feature = "bincode")]
 mod file;
 
@@ -73,6 +80,9 @@ mod range;
 mod sliceop;
 mod solver;
 mod utility;
+
+#[cfg(feature = "abstraction")]
+pub use abstraction::*;
 
 #[cfg(feature = "bincode")]
 pub use file::*;

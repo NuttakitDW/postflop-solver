@@ -2,6 +2,9 @@ use super::*;
 use crate::sliceop::*;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "abstraction")]
+use crate::abstraction::*;
+
 #[inline]
 fn min(x: f64, y: f64) -> f64 {
     if x < y {
@@ -319,6 +322,93 @@ impl PostFlopGame {
                         r.write(0.0);
                     }
                 });
+        }
+    }
+}
+
+// Abstraction-aware evaluation methods
+#[cfg(feature = "abstraction")]
+impl PostFlopGame {
+    /// Evaluates terminal node at bucket level when abstraction is enabled.
+    ///
+    /// Process:
+    /// 1. Expand bucket cfreach to hand-level cfreach
+    /// 2. Compute hand-level CFV using existing evaluation
+    /// 3. Aggregate hand-level CFV back to bucket-level
+    pub(super) fn evaluate_abstracted(
+        &self,
+        result: &mut [MaybeUninit<f32>],
+        node: &PostFlopNode,
+        player: usize,
+        bucket_cfreach: &[f32],
+    ) {
+        let data = match &self.abstraction_data {
+            Some(d) => d,
+            None => {
+                // Fallback to regular evaluation
+                if self.bunching_num_dead_cards == 0 {
+                    self.evaluate_internal(result, node, player, bucket_cfreach);
+                } else {
+                    self.evaluate_internal_bunching(result, node, player, bucket_cfreach);
+                }
+                return;
+            }
+        };
+
+        let num_hands = self.private_cards[player].len();
+        let opponent = player ^ 1;
+
+        // Get the mapping for opponent (we need to expand opponent's bucket cfreach to hands)
+        let opp_mapping = data.get_mapping(opponent, node.turn, node.river);
+
+        let hand_cfreach: Vec<f32> = if let Some(mapping) = opp_mapping {
+            // Expand bucket cfreach to hand-level
+            expand_bucket_to_hands(bucket_cfreach, mapping, self.private_cards[opponent].len())
+        } else {
+            bucket_cfreach.to_vec()
+        };
+
+        // Compute hand-level CFV
+        let mut hand_cfv: Vec<MaybeUninit<f32>> = vec![MaybeUninit::uninit(); num_hands];
+
+        if self.bunching_num_dead_cards == 0 {
+            self.evaluate_internal(&mut hand_cfv, node, player, &hand_cfreach);
+        } else {
+            self.evaluate_internal_bunching(&mut hand_cfv, node, player, &hand_cfreach);
+        }
+
+        // Convert MaybeUninit to initialized
+        let hand_cfv: Vec<f32> = hand_cfv
+            .into_iter()
+            .map(|v| unsafe { v.assume_init() })
+            .collect();
+
+        // Get the mapping for player to aggregate results
+        let player_mapping = data.get_mapping(player, node.turn, node.river);
+
+        if let Some(mapping) = player_mapping {
+            // Aggregate hand-level CFV to bucket-level
+            let num_buckets = mapping.num_buckets();
+
+            // Use initial weights as hand weights for aggregation
+            let hand_weights = &self.initial_weights[player];
+
+            let bucket_cfv = aggregate_hands_to_buckets(&hand_cfv, hand_weights, mapping);
+
+            // Write results
+            for (i, &cfv) in bucket_cfv.iter().enumerate().take(result.len()) {
+                result[i].write(cfv);
+            }
+
+            // Fill remaining with zeros if needed
+            for r in result.iter_mut().skip(num_buckets) {
+                r.write(0.0);
+            }
+        } else {
+            // No mapping, just copy results
+            for (r, &cfv) in result.iter_mut().zip(hand_cfv.iter()) {
+                r.write(cfv);
+            }
         }
     }
 }
