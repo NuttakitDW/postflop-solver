@@ -1,4 +1,5 @@
 use super::*;
+use crate::card::NOT_DEALT;
 use crate::sliceop::*;
 use std::mem::MaybeUninit;
 
@@ -54,13 +55,58 @@ impl PostFlopGame {
                 amount_lose
             };
 
-            // Sum opponent reach probabilities (by bucket)
-            let cfreach_sum: f32 = cfreach[..num_opponent_buckets].iter().sum();
+            // Get bucket matchups to account for card blocking
+            // For fold evaluation, card blocking depends only on private cards, not the runout.
+            // If the specific runout is unavailable (e.g., river=NOT_DEALT), use the first runout's matchups.
+            let bucket_matchups = if node.river != NOT_DEALT {
+                abstraction_data.get_bucket_matchups(node.turn, node.river)
+            } else {
+                // Use first runout's matchups (blocking is same for all runouts)
+                abstraction_data.bucket_matchups.first()
+            };
 
-            // In bucket abstraction, we ignore card blocking
-            // Each bucket gets: payoff * total_opponent_reach
-            for b in 0..num_player_buckets {
-                result[b] = payoff * cfreach_sum;
+            if let Some(matchups_matrix) = bucket_matchups {
+                // For each player bucket, compute CFV accounting for card blocking
+                // CFV[b] = payoff * sum_o(cfreach[o] * non_blocking_fraction[b][o])
+                // where non_blocking_fraction = matchups[b][o] / (|bucket_b| * |bucket_o|)
+                //
+                // NOTE: matchups_matrix is indexed as [oop_bucket][ip_bucket]
+                // We must access it correctly based on which player we're evaluating
+
+                for player_bucket in 0..num_player_buckets {
+                    let mut cfv = 0.0f32;
+                    let player_bucket_size = abstraction_data.bucket_to_hands[player][player_bucket].len() as f32;
+
+                    for opp_bucket in 0..num_opponent_buckets {
+                        let opp_reach = cfreach[opp_bucket];
+                        if opp_reach > 0.0 {
+                            // matchups_matrix is [oop][ip], so index correctly based on player
+                            let matchup_count = if player == 0 {
+                                // Player is OOP: matchups[oop_bucket][ip_bucket]
+                                matchups_matrix[player_bucket][opp_bucket] as f32
+                            } else {
+                                // Player is IP: matchups[oop_bucket][ip_bucket] where oop=opp, ip=player
+                                matchups_matrix[opp_bucket][player_bucket] as f32
+                            };
+                            let opp_bucket_size = abstraction_data.bucket_to_hands[player ^ 1][opp_bucket].len() as f32;
+
+                            if opp_bucket_size > 0.0 && player_bucket_size > 0.0 {
+                                // non_blocking_fraction approximates the fraction of hand pairs
+                                // between these buckets that don't share cards
+                                let non_blocking_fraction = matchup_count / (player_bucket_size * opp_bucket_size);
+                                cfv += opp_reach * non_blocking_fraction;
+                            }
+                        }
+                    }
+
+                    result[player_bucket] = payoff * cfv;
+                }
+            } else {
+                // Fallback: no matchups data, use simple sum (shouldn't happen)
+                let cfreach_sum: f32 = cfreach[..num_opponent_buckets].iter().sum();
+                for b in 0..num_player_buckets {
+                    result[b] = payoff * cfreach_sum;
+                }
             }
         }
         // Showdown
@@ -70,14 +116,21 @@ impl PostFlopGame {
 
             if let Some(equity_matrix) = bucket_equity {
                 // For each player bucket, compute weighted CFV
+                // NOTE: equity_matrix is indexed as [oop_bucket][ip_bucket] and stores OOP's equity
                 for player_bucket in 0..num_player_buckets {
                     let mut cfv = 0.0f32;
 
                     for opp_bucket in 0..num_opponent_buckets {
                         let opp_reach = cfreach[opp_bucket];
                         if opp_reach > 0.0 {
-                            // equity[player_bucket][opp_bucket] is player's equity
-                            let equity = equity_matrix[player_bucket][opp_bucket];
+                            // equity_matrix[oop][ip] = OOP's equity
+                            // For OOP (player=0): use equity directly
+                            // For IP (player=1): use 1 - equity (opponent is OOP, so we flip)
+                            let equity = if player == 0 {
+                                equity_matrix[player_bucket][opp_bucket]
+                            } else {
+                                1.0 - equity_matrix[opp_bucket][player_bucket]
+                            };
                             // CFV = reach * (equity * win + (1-equity) * lose)
                             let value = equity * amount_win + (1.0 - equity) * amount_lose;
                             cfv += opp_reach * value;
