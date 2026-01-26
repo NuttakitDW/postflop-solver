@@ -254,6 +254,14 @@ impl PostFlopGame {
         &self.private_cards[player]
     }
 
+    /// Returns the hand strength data for all (turn, river) runouts.
+    ///
+    /// Used internally for hand abstraction clustering.
+    #[inline]
+    pub(crate) fn hand_strength(&self) -> &[[Vec<StrengthItem>; 2]] {
+        &self.hand_strength
+    }
+
     /// Returns the estimated memory usage in bytes (uncompressed, compressed).
     #[inline]
     pub fn memory_usage(&self) -> (u64, u64) {
