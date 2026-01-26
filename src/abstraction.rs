@@ -7,6 +7,7 @@
 use bincode::{Decode, Encode};
 
 use crate::card::{card_pair_to_index, Card, StrengthItem, NOT_DEALT};
+use crate::interface::Game;
 
 /// Helper function to process a single (turn, river) runout for EHS computation.
 #[inline]
@@ -414,6 +415,393 @@ pub struct ClusteringResult {
     pub iterations: usize,
     /// Hand features used for clustering.
     pub features: Vec<HandFeatures>,
+}
+
+/// Precomputed abstraction data for bucket-based solving.
+///
+/// Contains hand-to-bucket mappings, bucket weights, and precomputed
+/// bucket equity tables for all possible runouts.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
+pub struct AbstractionData {
+    /// Maps hand index to bucket index for each player.
+    pub hand_to_bucket: [Vec<u16>; 2],
+    /// Maps bucket index to list of hand indices for each player.
+    pub bucket_to_hands: [Vec<Vec<u16>>; 2],
+    /// Number of buckets for each player.
+    pub num_buckets: [usize; 2],
+    /// Sum of hand weights for each bucket for each player.
+    pub bucket_weights: [Vec<f32>; 2],
+    /// Precomputed bucket equity tables.
+    /// Indexed as: bucket_equity[runout_index][oop_bucket][ip_bucket]
+    /// Value is OOP's equity against IP in that bucket matchup.
+    pub bucket_equity: Vec<Vec<Vec<f32>>>,
+    /// Number of valid runouts stored.
+    pub num_runouts: usize,
+    /// Maps (turn, river) card pair to runout index (-1 if invalid).
+    runout_to_index: Vec<i32>,
+}
+
+impl AbstractionData {
+    /// Compute abstraction data from a game and clustering configuration.
+    ///
+    /// This is the main factory method for creating abstraction data.
+    /// It performs:
+    /// 1. Hand clustering using k-means
+    /// 2. Bucket weight computation
+    /// 3. Bucket equity precomputation for all runouts
+    pub fn compute(
+        game: &crate::game::PostFlopGame,
+        config: &AbstractionConfig,
+    ) -> Self {
+        // Cluster hands for both players
+        let clustering_oop = cluster_hands(game, 0, config);
+        let clustering_ip = cluster_hands(game, 1, config);
+
+        // Build hand-to-bucket and bucket-to-hands mappings
+        let hand_to_bucket = [
+            clustering_oop.assignments.clone(),
+            clustering_ip.assignments.clone(),
+        ];
+
+        let bucket_to_hands = [
+            build_bucket_to_hands(&clustering_oop.assignments, clustering_oop.cluster_sizes.len()),
+            build_bucket_to_hands(&clustering_ip.assignments, clustering_ip.cluster_sizes.len()),
+        ];
+
+        let num_buckets = [
+            clustering_oop.cluster_sizes.len(),
+            clustering_ip.cluster_sizes.len(),
+        ];
+
+        // Compute bucket weights
+        let initial_weights_oop = game.initial_weights(0);
+        let initial_weights_ip = game.initial_weights(1);
+
+        let bucket_weights = [
+            compute_bucket_weights(initial_weights_oop, &hand_to_bucket[0], num_buckets[0]),
+            compute_bucket_weights(initial_weights_ip, &hand_to_bucket[1], num_buckets[1]),
+        ];
+
+        // Precompute bucket equity tables
+        let (bucket_equity, runout_to_index, num_runouts) = precompute_bucket_equity(
+            game,
+            &hand_to_bucket,
+            &bucket_to_hands,
+            num_buckets,
+        );
+
+        Self {
+            hand_to_bucket,
+            bucket_to_hands,
+            num_buckets,
+            bucket_weights,
+            bucket_equity,
+            num_runouts,
+            runout_to_index,
+        }
+    }
+
+    /// Get the bucket index for a hand.
+    #[inline]
+    pub fn get_bucket(&self, player: usize, hand_idx: usize) -> u16 {
+        self.hand_to_bucket[player][hand_idx]
+    }
+
+    /// Get the bucket equity for a specific runout.
+    ///
+    /// Returns the equity matrix for OOP vs IP buckets, or None if the runout is invalid.
+    #[inline]
+    pub fn get_bucket_equity(&self, turn: Card, river: Card) -> Option<&Vec<Vec<f32>>> {
+        let (lo, hi) = if turn < river { (turn, river) } else { (river, turn) };
+        let pair_idx = card_pair_to_index(lo, hi);
+        let runout_idx = self.runout_to_index[pair_idx];
+        if runout_idx < 0 {
+            None
+        } else {
+            Some(&self.bucket_equity[runout_idx as usize])
+        }
+    }
+
+    /// Get the weight of a bucket.
+    #[inline]
+    pub fn get_bucket_weight(&self, player: usize, bucket: usize) -> f32 {
+        self.bucket_weights[player][bucket]
+    }
+
+    /// Get all hands in a bucket.
+    #[inline]
+    pub fn get_hands_in_bucket(&self, player: usize, bucket: usize) -> &[u16] {
+        &self.bucket_to_hands[player][bucket]
+    }
+
+    /// Get the number of buckets for a player.
+    #[inline]
+    pub fn num_buckets(&self, player: usize) -> usize {
+        self.num_buckets[player]
+    }
+
+    /// Memory usage in bytes.
+    pub fn memory_usage(&self) -> usize {
+        let mut usage = 0usize;
+
+        // hand_to_bucket
+        for h2b in &self.hand_to_bucket {
+            usage += h2b.len() * std::mem::size_of::<u16>();
+        }
+
+        // bucket_to_hands
+        for b2h in &self.bucket_to_hands {
+            for hands in b2h {
+                usage += hands.len() * std::mem::size_of::<u16>();
+            }
+            usage += b2h.len() * std::mem::size_of::<Vec<u16>>();
+        }
+
+        // bucket_weights
+        for bw in &self.bucket_weights {
+            usage += bw.len() * std::mem::size_of::<f32>();
+        }
+
+        // bucket_equity
+        for runout in &self.bucket_equity {
+            for oop_bucket in runout {
+                usage += oop_bucket.len() * std::mem::size_of::<f32>();
+            }
+            usage += runout.len() * std::mem::size_of::<Vec<f32>>();
+        }
+        usage += self.bucket_equity.len() * std::mem::size_of::<Vec<Vec<f32>>>();
+
+        // runout_to_index
+        usage += self.runout_to_index.len() * std::mem::size_of::<i32>();
+
+        usage
+    }
+}
+
+/// Build bucket-to-hands mapping from hand-to-bucket assignments.
+fn build_bucket_to_hands(assignments: &[u16], num_buckets: usize) -> Vec<Vec<u16>> {
+    let mut result = vec![Vec::new(); num_buckets];
+    for (hand_idx, &bucket) in assignments.iter().enumerate() {
+        result[bucket as usize].push(hand_idx as u16);
+    }
+    result
+}
+
+/// Compute bucket weights by summing hand weights per bucket.
+pub fn compute_bucket_weights(
+    initial_weights: &[f32],
+    hand_to_bucket: &[u16],
+    num_buckets: usize,
+) -> Vec<f32> {
+    let mut weights = vec![0.0f32; num_buckets];
+    for (hand_idx, &bucket) in hand_to_bucket.iter().enumerate() {
+        weights[bucket as usize] += initial_weights[hand_idx];
+    }
+    weights
+}
+
+/// Compute equity between buckets for a single runout.
+///
+/// Returns a matrix where result[oop_bucket][ip_bucket] is OOP's equity.
+fn compute_bucket_equity_for_runout(
+    hand_strength: &[Vec<StrengthItem>; 2],
+    private_cards: &[Vec<(Card, Card)>; 2],
+    hand_to_bucket: &[Vec<u16>; 2],
+    num_buckets: [usize; 2],
+    board_mask: u64,
+) -> Vec<Vec<f32>> {
+    let oop_strength = &hand_strength[0];
+    let ip_strength = &hand_strength[1];
+
+    // Accumulators: wins[oop_bucket][ip_bucket], ties, total
+    let mut wins = vec![vec![0u64; num_buckets[1]]; num_buckets[0]];
+    let mut ties = vec![vec![0u64; num_buckets[1]]; num_buckets[0]];
+    let mut total = vec![vec![0u64; num_buckets[1]]; num_buckets[0]];
+
+    // Build valid hands list for each player (excluding sentinels and card conflicts)
+    let valid_oop: Vec<_> = oop_strength
+        .iter()
+        .filter(|s| s.strength != 0 && s.strength != u16::MAX)
+        .map(|s| {
+            let hand_idx = s.index as usize;
+            let (c1, c2) = private_cards[0][hand_idx];
+            let hand_mask = (1u64 << c1) | (1u64 << c2);
+            (s.strength, hand_idx, hand_mask)
+        })
+        .filter(|(_, _, mask)| mask & board_mask == 0)
+        .collect();
+
+    let valid_ip: Vec<_> = ip_strength
+        .iter()
+        .filter(|s| s.strength != 0 && s.strength != u16::MAX)
+        .map(|s| {
+            let hand_idx = s.index as usize;
+            let (c1, c2) = private_cards[1][hand_idx];
+            let hand_mask = (1u64 << c1) | (1u64 << c2);
+            (s.strength, hand_idx, hand_mask)
+        })
+        .filter(|(_, _, mask)| mask & board_mask == 0)
+        .collect();
+
+    // Compare all OOP hands against all IP hands
+    for &(oop_str, oop_hand, oop_mask) in &valid_oop {
+        let oop_bucket = hand_to_bucket[0][oop_hand] as usize;
+
+        for &(ip_str, ip_hand, ip_mask) in &valid_ip {
+            // Skip if hands share cards
+            if oop_mask & ip_mask != 0 {
+                continue;
+            }
+
+            let ip_bucket = hand_to_bucket[1][ip_hand] as usize;
+            total[oop_bucket][ip_bucket] += 1;
+
+            if oop_str > ip_str {
+                wins[oop_bucket][ip_bucket] += 1;
+            } else if oop_str == ip_str {
+                ties[oop_bucket][ip_bucket] += 1;
+            }
+        }
+    }
+
+    // Convert to equity
+    let mut equity = vec![vec![0.0f32; num_buckets[1]]; num_buckets[0]];
+    for oop_b in 0..num_buckets[0] {
+        for ip_b in 0..num_buckets[1] {
+            if total[oop_b][ip_b] > 0 {
+                let eq = (wins[oop_b][ip_b] as f64
+                    + 0.5 * ties[oop_b][ip_b] as f64)
+                    / total[oop_b][ip_b] as f64;
+                equity[oop_b][ip_b] = eq as f32;
+            } else {
+                // No matchups possible, use 0.5 as default
+                equity[oop_b][ip_b] = 0.5;
+            }
+        }
+    }
+
+    equity
+}
+
+/// Precompute bucket equity tables for all valid runouts.
+///
+/// Returns:
+/// - Vec of equity matrices (one per runout)
+/// - Mapping from (turn, river) pair index to runout index (-1 if invalid)
+/// - Number of valid runouts
+fn precompute_bucket_equity(
+    game: &crate::game::PostFlopGame,
+    hand_to_bucket: &[Vec<u16>; 2],
+    bucket_to_hands: &[Vec<Vec<u16>>; 2],
+    num_buckets: [usize; 2],
+) -> (Vec<Vec<Vec<f32>>>, Vec<i32>, usize) {
+    let hand_strength = game.hand_strength();
+    let card_config = game.card_config();
+    let private_cards: [Vec<(Card, Card)>; 2] = [
+        game.private_cards(0).to_vec(),
+        game.private_cards(1).to_vec(),
+    ];
+
+    let flop_mask: u64 = (1 << card_config.flop[0])
+        | (1 << card_config.flop[1])
+        | (1 << card_config.flop[2]);
+
+    // Maximum pair index for (card, card) pairs
+    let max_pair_index = card_pair_to_index(50, 51) + 1;
+    let mut runout_to_index = vec![-1i32; max_pair_index];
+    let mut bucket_equity = Vec::new();
+
+    // Determine which runouts to compute based on game state
+    let turn_fixed = card_config.turn != NOT_DEALT;
+    let river_fixed = card_config.river != NOT_DEALT;
+
+    if turn_fixed && river_fixed {
+        // Single runout
+        let turn = card_config.turn;
+        let river = card_config.river;
+        let (lo, hi) = if turn < river { (turn, river) } else { (river, turn) };
+        let pair_idx = card_pair_to_index(lo, hi);
+
+        let board_mask = flop_mask | (1 << turn) | (1 << river);
+        let strength_idx = card_pair_to_index(lo, hi);
+
+        if !hand_strength[strength_idx][0].is_empty() {
+            let equity = compute_bucket_equity_for_runout(
+                &hand_strength[strength_idx],
+                &private_cards,
+                hand_to_bucket,
+                num_buckets,
+                board_mask,
+            );
+            runout_to_index[pair_idx] = 0;
+            bucket_equity.push(equity);
+        }
+    } else if turn_fixed {
+        // Turn is dealt, iterate all rivers
+        let turn = card_config.turn;
+        for river in 0..52u8 {
+            if (1 << river) & flop_mask != 0 || river == turn {
+                continue;
+            }
+            let (lo, hi) = if turn < river { (turn, river) } else { (river, turn) };
+            let pair_idx = card_pair_to_index(lo, hi);
+
+            let board_mask = flop_mask | (1 << turn) | (1 << river);
+            let strength_idx = card_pair_to_index(lo, hi);
+
+            if hand_strength[strength_idx][0].is_empty() {
+                continue;
+            }
+
+            let equity = compute_bucket_equity_for_runout(
+                &hand_strength[strength_idx],
+                &private_cards,
+                hand_to_bucket,
+                num_buckets,
+                board_mask,
+            );
+            runout_to_index[pair_idx] = bucket_equity.len() as i32;
+            bucket_equity.push(equity);
+        }
+    } else {
+        // Flop: iterate all (turn, river) pairs
+        for turn in 0..52u8 {
+            if (1 << turn) & flop_mask != 0 {
+                continue;
+            }
+            for river in (turn + 1)..52u8 {
+                if (1 << river) & flop_mask != 0 {
+                    continue;
+                }
+                let pair_idx = card_pair_to_index(turn, river);
+
+                let board_mask = flop_mask | (1 << turn) | (1 << river);
+                let strength_idx = card_pair_to_index(turn, river);
+
+                if hand_strength[strength_idx][0].is_empty() {
+                    continue;
+                }
+
+                let equity = compute_bucket_equity_for_runout(
+                    &hand_strength[strength_idx],
+                    &private_cards,
+                    hand_to_bucket,
+                    num_buckets,
+                    board_mask,
+                );
+                runout_to_index[pair_idx] = bucket_equity.len() as i32;
+                bucket_equity.push(equity);
+            }
+        }
+    }
+
+    let num_runouts = bucket_equity.len();
+
+    // Drop unused bucket_to_hands reference to avoid unused warning
+    let _ = bucket_to_hands;
+
+    (bucket_equity, runout_to_index, num_runouts)
 }
 
 /// Compute hand clustering for a PostFlopGame.

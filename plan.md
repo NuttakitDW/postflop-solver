@@ -47,37 +47,37 @@
 
 ---
 
-### Phase 2: Bucket Equity Precomputation
+### Phase 2: Bucket Equity Precomputation ✅ COMPLETE
 
-- [ ] **2.1** Add `AbstractionData` struct
+- [x] **2.1** Add `AbstractionData` struct
   - `hand_to_bucket: [Vec<u16>; 2]`
   - `bucket_to_hands: [Vec<Vec<u16>>; 2]`
   - `num_buckets: [usize; 2]`
   - `bucket_weights: [Vec<f32>; 2]`
   - **Test**: Struct compiles, can be serialized
 
-- [ ] **2.2** Implement bucket weight computation
+- [x] **2.2** Implement bucket weight computation
   - `compute_bucket_weights(initial_weights, hand_to_bucket) -> [Vec<f32>; 2]`
   - Sum of hand weights per bucket
   - **Test**: Weights sum to total range weight
 
-- [ ] **2.3** Implement single runout equity computation
-  - `compute_equity_for_runout(turn, river, hand_strength, ...) -> Vec<Vec<f32>>`
+- [x] **2.3** Implement single runout equity computation
+  - `compute_bucket_equity_for_runout(...)` - computes k×k equity matrix
   - For one (turn, river): compute k×k equity matrix
   - **Test**: equity[i][j] + equity[j][i] ≈ 1.0 (accounting for ties)
 
-- [ ] **2.4** Implement full bucket equity precomputation
+- [x] **2.4** Implement full bucket equity precomputation
   - `precompute_bucket_equity(...) -> Vec<Vec<Vec<f32>>>`
   - For all valid (turn, river) pairs
   - **Test**: Correct number of runouts, reasonable equity values
 
-- [ ] **2.5** Add `AbstractionData::compute()` factory
+- [x] **2.5** Add `AbstractionData::compute()` factory
   - Orchestrates: features → kmeans → weights → equity
   - **Test**: Full abstraction data created from game config
 
-- [ ] **2.6** Benchmark precomputation time
-  - Measure time for k=30, 50, 100
-  - **Test**: Precomputation < 10 seconds for typical config
+- [x] **2.6** Benchmark precomputation time
+  - Measured: k=30 ~2.2s, k=50 ~2.4s, k=100 ~3.3s
+  - **Test**: Precomputation < 10 seconds for typical config ✓
 
 ---
 
@@ -187,16 +187,17 @@
 
 ## Files to Create/Modify
 
-| File | Action | Phase |
-|------|--------|-------|
-| `src/abstraction.rs` | CREATE | 1 |
-| `src/lib.rs` | MODIFY (export) | 1 |
-| `src/game/mod.rs` | MODIFY (add fields) | 3 |
-| `src/game/base.rs` | MODIFY (push_actions) | 3 |
-| `src/solver.rs` | MODIFY (bucket arrays) | 4 |
-| `src/game/evaluation.rs` | MODIFY (add abstracted eval) | 5 |
-| `examples/test_kmeans.rs` | CREATE | 1 |
-| `examples/benchmark.rs` | MODIFY (add --buckets flag) | 7 |
+| File | Action | Phase | Status |
+|------|--------|-------|--------|
+| `src/abstraction.rs` | CREATE | 1, 2 | ✅ Done |
+| `src/lib.rs` | MODIFY (export) | 1 | ✅ Done |
+| `src/game/mod.rs` | MODIFY (add fields) | 3 | Pending |
+| `src/game/base.rs` | MODIFY (push_actions) | 3 | Pending |
+| `src/solver.rs` | MODIFY (bucket arrays) | 4 | Pending |
+| `src/game/evaluation.rs` | MODIFY (add abstracted eval) | 5 | Pending |
+| `examples/test_kmeans.rs` | CREATE | 1 | ✅ Done |
+| `examples/test_bucket_equity.rs` | CREATE | 2 | ✅ Done |
+| `examples/benchmark.rs` | MODIFY (add --buckets flag) | 7 | Pending |
 
 ---
 
@@ -213,5 +214,5 @@
 
 ## Current Status
 
-**Phase**: 1 complete ✅
-**Next Task**: 2.1 - Add `AbstractionData` struct for bucket equity precomputation
+**Phase**: 2 complete ✅
+**Next Task**: 3.1 - Add abstraction fields to `PostFlopGame`
