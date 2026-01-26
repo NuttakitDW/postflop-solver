@@ -12,6 +12,63 @@ fn min(x: f64, y: f64) -> f64 {
     }
 }
 
+/// SIMD-friendly dot product for f32 slices.
+///
+/// Processes 4 elements at a time, enabling auto-vectorization by the compiler.
+/// This pattern is recognized by LLVM and converted to SIMD instructions.
+#[inline]
+fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+
+    let len = a.len();
+    let chunks = len / 4;
+    let mut sum = 0.0f32;
+
+    // Process 4 elements at a time (auto-vectorized to SIMD)
+    for i in 0..chunks {
+        let i4 = i * 4;
+        sum += a[i4] * b[i4]
+            + a[i4 + 1] * b[i4 + 1]
+            + a[i4 + 2] * b[i4 + 2]
+            + a[i4 + 3] * b[i4 + 3];
+    }
+
+    // Handle remainder
+    for i in (chunks * 4)..len {
+        sum += a[i] * b[i];
+    }
+
+    sum
+}
+
+/// SIMD-friendly dot product with negation for f32 slices.
+///
+/// Computes -dot(a, b), useful for IP player perspective flip.
+#[inline]
+fn dot_product_neg(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+
+    let len = a.len();
+    let chunks = len / 4;
+    let mut sum = 0.0f32;
+
+    // Process 4 elements at a time (auto-vectorized to SIMD)
+    for i in 0..chunks {
+        let i4 = i * 4;
+        sum -= a[i4] * b[i4]
+            + a[i4 + 1] * b[i4 + 1]
+            + a[i4 + 2] * b[i4 + 2]
+            + a[i4 + 3] * b[i4 + 3];
+    }
+
+    // Handle remainder
+    for i in (chunks * 4)..len {
+        sum -= a[i] * b[i];
+    }
+
+    sum
+}
+
 /// Abstracted evaluation using precomputed bucket equity tables.
 ///
 /// This function computes CFV for each bucket instead of each hand,
@@ -109,38 +166,58 @@ impl PostFlopGame {
                 }
             }
         }
-        // Showdown
+        // Showdown - SIMD optimized
         else {
-            // Get bucket equity for this runout
-            let bucket_equity = abstraction_data.get_bucket_equity(node.turn, node.river);
+            // Get bucket value matrix for this runout (normalized format: v = 2*equity - 1)
+            let bucket_value = abstraction_data.get_bucket_value(node.turn, node.river);
 
-            if let Some(equity_matrix) = bucket_equity {
-                // For each player bucket, compute weighted CFV
-                // NOTE: equity_matrix is indexed as [oop_bucket][ip_bucket] and stores OOP's equity
-                for player_bucket in 0..num_player_buckets {
-                    let mut cfv = 0.0f32;
+            if let Some(value_matrix) = bucket_value {
+                // SIMD-optimized showdown evaluation using normalized values
+                //
+                // Math derivation:
+                //   CFV = sum_o(cfreach[o] * (equity * win + (1-equity) * lose))
+                //       = sum_o(cfreach[o] * (equity * (win - lose) + lose))
+                //
+                // With normalized value v = 2*equity - 1, we get equity = (v + 1) / 2:
+                //   CFV = sum_o(cfreach[o] * ((v+1)/2 * (win-lose) + lose))
+                //       = sum_o(cfreach[o]) * ((win+lose)/2) + sum_o(cfreach[o] * v) * ((win-lose)/2)
+                //       = cfreach_sum * bias_per_reach + dot(value_row, cfreach) * scale
+                //
+                // Precompute constants (done once per evaluation)
+                let scale = (amount_win - amount_lose) * 0.5;
+                let bias_per_reach = (amount_win + amount_lose) * 0.5;
+                let cfreach_sum: f32 = cfreach[..num_opponent_buckets].iter().sum();
+                let bias = cfreach_sum * bias_per_reach;
 
-                    for opp_bucket in 0..num_opponent_buckets {
-                        let opp_reach = cfreach[opp_bucket];
-                        if opp_reach > 0.0 {
-                            // equity_matrix[oop][ip] = OOP's equity
-                            // For OOP (player=0): use equity directly
-                            // For IP (player=1): use 1 - equity (opponent is OOP, so we flip)
-                            let equity = if player == 0 {
-                                equity_matrix[player_bucket][opp_bucket]
-                            } else {
-                                1.0 - equity_matrix[opp_bucket][player_bucket]
-                            };
-                            // CFV = reach * (equity * win + (1-equity) * lose)
-                            let value = equity * amount_win + (1.0 - equity) * amount_lose;
-                            cfv += opp_reach * value;
-                        }
+                // value_matrix is [oop_bucket][ip_bucket], stores OOP's normalized value
+                // For OOP (player=0): use value directly
+                // For IP (player=1): use -value (flip perspective)
+
+                if player == 0 {
+                    // OOP: direct row access (cache-friendly)
+                    for player_bucket in 0..num_player_buckets {
+                        let value_row = &value_matrix[player_bucket][..num_opponent_buckets];
+                        let dot = dot_product(value_row, &cfreach[..num_opponent_buckets]);
+                        result[player_bucket] = dot * scale + bias;
                     }
-
-                    result[player_bucket] = cfv;
+                } else {
+                    // IP: column access (transposed perspective)
+                    // For IP, we need value_matrix[opp_bucket][player_bucket] and negate
+                    // Pre-allocate buffer once outside the loop for better performance
+                    let mut value_col = vec![0.0f32; num_opponent_buckets];
+                    let cfreach_slice = &cfreach[..num_opponent_buckets];
+                    for player_bucket in 0..num_player_buckets {
+                        // Extract column: value_col[o] = value_matrix[o][player_bucket]
+                        for (opp_bucket, val) in value_col.iter_mut().enumerate() {
+                            *val = value_matrix[opp_bucket][player_bucket];
+                        }
+                        // Negate because IP's value = -OOP's value
+                        let dot = dot_product_neg(&value_col, cfreach_slice);
+                        result[player_bucket] = dot * scale + bias;
+                    }
                 }
             } else {
-                // No equity data for this runout (shouldn't happen normally)
+                // No value data for this runout (shouldn't happen normally)
                 for b in 0..num_player_buckets {
                     result[b] = 0.0;
                 }

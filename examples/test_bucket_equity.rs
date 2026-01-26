@@ -1,6 +1,9 @@
-//! Test bucket equity precomputation for the postflop solver.
+//! Test bucket value precomputation for the postflop solver.
 //!
 //! Run with: `cargo run --example test_bucket_equity`
+//!
+//! Note: The abstraction stores normalized values in [-1, +1] range where:
+//! value = 2 * equity - 1 (so equity 0.5 maps to value 0.0)
 
 use postflop_solver::*;
 use std::time::Instant;
@@ -201,53 +204,55 @@ fn test_bucket_equity() {
 
     let abstraction = AbstractionData::compute(&game, &config);
 
-    // Get a specific runout equity and verify properties
+    // Get a specific runout value and verify properties
     // For flop game, we need to pick valid turn+river
     let test_turn = card_from_str("Ah").unwrap();
     let test_river = card_from_str("3d").unwrap();
 
-    if let Some(equity_matrix) = abstraction.get_bucket_equity(test_turn, test_river) {
+    if let Some(value_matrix) = abstraction.get_bucket_value(test_turn, test_river) {
         println!("  Testing runout Ah3d:");
-        println!("  Matrix size: {} x {}", equity_matrix.len(), equity_matrix[0].len());
+        println!("  Matrix size: {} x {}", value_matrix.len(), value_matrix[0].len());
 
         // Verify dimensions
-        assert_eq!(equity_matrix.len(), abstraction.num_buckets(0));
-        assert_eq!(equity_matrix[0].len(), abstraction.num_buckets(1));
+        assert_eq!(value_matrix.len(), abstraction.num_buckets(0));
+        assert_eq!(value_matrix[0].len(), abstraction.num_buckets(1));
 
-        // Verify all values are in [0, 1]
-        let mut min_eq = 1.0f32;
-        let mut max_eq = 0.0f32;
-        let mut sum_eq = 0.0f64;
+        // Verify all values are in [-1, 1] (normalized format: value = 2*equity - 1)
+        let mut min_val = 1.0f32;
+        let mut max_val = -1.0f32;
+        let mut sum_val = 0.0f64;
         let mut count = 0usize;
 
-        for row in equity_matrix {
-            for &eq in row {
-                assert!(eq >= 0.0 && eq <= 1.0, "Equity {} out of range", eq);
-                min_eq = min_eq.min(eq);
-                max_eq = max_eq.max(eq);
-                sum_eq += eq as f64;
+        for row in value_matrix {
+            for &val in row {
+                assert!(val >= -1.0 && val <= 1.0, "Value {} out of range [-1, 1]", val);
+                min_val = min_val.min(val);
+                max_val = max_val.max(val);
+                sum_val += val as f64;
                 count += 1;
             }
         }
 
-        let avg_eq = sum_eq / count as f64;
-        println!("  Equity range: [{:.3}, {:.3}], avg: {:.3}", min_eq, max_eq, avg_eq);
+        let avg_val = sum_val / count as f64;
+        // Convert average value back to equity for display
+        let avg_eq = (avg_val + 1.0) / 2.0;
+        println!("  Value range: [{:.3}, {:.3}], avg: {:.3} (equity: {:.3})", min_val, max_val, avg_val, avg_eq);
 
-        // Average should be somewhere around 0.5 (roughly balanced game)
+        // Average equity should be somewhere around 0.5 (value around 0.0)
         assert!(
             avg_eq > 0.2 && avg_eq < 0.8,
             "Average equity {} seems unreasonable",
             avg_eq
         );
 
-        println!("  ✓ PASS: Bucket equity values verified");
+        println!("  ✓ PASS: Bucket value values verified");
     } else {
-        println!("  ✗ FAIL: Could not get equity for runout");
+        println!("  ✗ FAIL: Could not get value for runout");
     }
 
-    // Print sample equity matrix
-    println!("\n  Sample equity matrix (first 5x5):");
-    if let Some(eq) = abstraction.get_bucket_equity(test_turn, test_river) {
+    // Print sample value matrix
+    println!("\n  Sample value matrix (first 5x5) [format: value = 2*equity - 1]:");
+    if let Some(val) = abstraction.get_bucket_value(test_turn, test_river) {
         print!("        ");
         for j in 0..5.min(abstraction.num_buckets(1)) {
             print!("  IP{:<2}", j);
@@ -256,7 +261,7 @@ fn test_bucket_equity() {
         for i in 0..5.min(abstraction.num_buckets(0)) {
             print!("  OOP{}: ", i);
             for j in 0..5.min(abstraction.num_buckets(1)) {
-                print!(" {:.2}", eq[i][j]);
+                print!(" {:.2}", val[i][j]);
             }
             println!();
         }
