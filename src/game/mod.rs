@@ -9,6 +9,7 @@ mod serialization;
 #[cfg(test)]
 mod tests;
 
+use crate::abstraction::{AbstractionConfig, AbstractionData};
 use crate::action_tree::*;
 use crate::card::*;
 use crate::mutex_like::*;
@@ -98,6 +99,10 @@ pub struct PostFlopGame {
     storage_ip: Vec<u8>,
     storage_chance: Vec<u8>,
     locking_strategy: BTreeMap<usize, Vec<f32>>,
+
+    // hand abstraction
+    abstraction_enabled: bool,
+    abstraction_data: Option<AbstractionData>,
 
     // result interpreter
     action_history: Vec<usize>,
