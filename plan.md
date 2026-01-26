@@ -156,19 +156,22 @@
 
 ---
 
-### Phase 6: Results Disaggregation
+### Phase 6: Results Disaggregation ✅ COMPLETE
 
-- [ ] **6.1** Implement `strategy()` with bucket mapping
+- [x] **6.1** Implement `strategy()` with bucket mapping
   - Map hand_idx → bucket_idx → bucket strategy
-  - **Test**: Returns valid strategy vector
+  - Modified interpreter.rs to expand bucket strategies to hand strategies
+  - **Test**: Returns valid strategy vector ✓
 
-- [ ] **6.2** Implement `expected_values()` with bucket mapping
+- [x] **6.2** Implement `expected_values()` with bucket mapping
   - Expand bucket EVs to per-hand EVs
-  - **Test**: Returns correct length vector
+  - Modified expected_values_detail() and play() CFV caching
+  - **Test**: Returns correct length vector ✓
 
-- [ ] **6.3** Verify API compatibility
+- [x] **6.3** Verify API compatibility
   - Existing code that queries results still works
-  - **Test**: All public API methods work in both modes
+  - Created test_api_abstraction.rs to verify
+  - **Test**: All public API methods work in both modes ✓
 
 ---
 
@@ -209,6 +212,8 @@
 | `examples/test_bucket_equity.rs` | CREATE | 2 | ✅ Done |
 | `examples/test_abstraction_memory.rs` | CREATE | 3 | ✅ Done |
 | `examples/test_solver_abstraction.rs` | CREATE | 4 | ✅ Done |
+| `examples/test_api_abstraction.rs` | CREATE | 6 | ✅ Done |
+| `src/game/interpreter.rs` | MODIFY (bucket expansion) | 6 | ✅ Done |
 | `examples/benchmark.rs` | MODIFY (add --buckets flag) | 7 | Pending |
 
 ---
@@ -226,12 +231,13 @@
 
 ## Current Status
 
-**Phase**: 5 complete ✅
-**Next Task**: 6.1 - Implement strategy() with bucket mapping (Results Disaggregation)
+**Phase**: 6 complete ✅
+**Next Task**: 7.1 - Create benchmark comparison script (Benchmarking & Validation)
 
-### Phase 5 Summary
-- Added `bucket_matchups` table to track non-blocking hand pairs between buckets
-- Fixed fold evaluation to weight opponent reach by non-blocking fraction
-- Fixed equity/matchups matrix indexing for IP player (matrices are [oop][ip])
-- Added NOT_DEALT handling for fold on incomplete boards
-- All tests pass, exploitability now reasonable (baseline 0.106, abstracted 0.051-0.061)
+### Phase 6 Summary
+- Modified `strategy()` in interpreter.rs to expand bucket strategies to hand strategies
+- Modified `expected_values_detail()` to expand bucket CFVs to hand EVs
+- Modified `play()` CFV caching to properly expand bucket values to hand values
+- Created test_api_abstraction.rs to verify API compatibility
+- All 59 tests pass, API returns correct hand-level results when abstraction enabled
+- Hands in same bucket correctly share the same strategy values

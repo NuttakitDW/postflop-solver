@@ -388,7 +388,26 @@ impl PostFlopGame {
 
             // cache the counterfactual values
             let node = self.node();
-            let vec = if self.is_compression_enabled {
+            let vec = if let Some(abs_data) = &self.abstraction_data {
+                // When abstraction is enabled, CFVs are stored at bucket level
+                // Expand to hand level for caching
+                let num_buckets = abs_data.num_buckets(player);
+                let hand_to_bucket = &abs_data.hand_to_bucket[player];
+
+                let bucket_values = if self.is_compression_enabled {
+                    let slice = row(node.cfvalues_compressed(), action, num_buckets);
+                    let scale = node.cfvalue_scale();
+                    decode_signed_slice(slice, scale)
+                } else {
+                    row(node.cfvalues(), action, num_buckets).to_vec()
+                };
+
+                // Expand bucket values to hand values
+                hand_to_bucket
+                    .iter()
+                    .map(|&bucket_idx| bucket_values[bucket_idx as usize])
+                    .collect::<Vec<_>>()
+            } else if self.is_compression_enabled {
                 let slice = row(node.cfvalues_compressed(), action, num_hands);
                 let scale = node.cfvalue_scale();
                 decode_signed_slice(slice, scale)
@@ -699,6 +718,9 @@ impl PostFlopGame {
     /// Otherwise, this method is the same as the [`expected_values`] method, so the return vector
     /// is the length of `#(private hands)`.
     ///
+    /// When abstraction is enabled, the internal bucket-level values are expanded to
+    /// hand-level values by mapping each hand to its bucket's value.
+    ///
     /// Panics if the game is not solved.
     ///
     /// After mutating the current node, you must call the [`cache_normalized_weights`] method
@@ -738,39 +760,88 @@ impl PostFlopGame {
         let mut have_actions = false;
         let mut normalizer = (num_combinations * chance_factor as f64) as f32;
 
+        // Helper to expand bucket-level values to hand-level values
+        let expand_bucket_to_hand = |bucket_values: Vec<f32>, num_actions_or_1: usize| -> Vec<f32> {
+            if let Some(abs_data) = &self.abstraction_data {
+                let num_buckets = abs_data.num_buckets(player);
+                let hand_to_bucket = &abs_data.hand_to_bucket[player];
+                let mut hand_values = vec![0.0f32; num_actions_or_1 * num_hands];
+
+                for action in 0..num_actions_or_1 {
+                    let bucket_row_start = action * num_buckets;
+                    let hand_row_start = action * num_hands;
+                    for (hand_idx, &bucket_idx) in hand_to_bucket.iter().enumerate() {
+                        hand_values[hand_row_start + hand_idx] =
+                            bucket_values[bucket_row_start + bucket_idx as usize];
+                    }
+                }
+                hand_values
+            } else {
+                bucket_values
+            }
+        };
+
         let mut ret = if node.is_terminal() {
             normalizer = num_combinations as f32;
-            let mut ret = Vec::with_capacity(num_hands);
-            let mut cfreach = self.weights[player ^ 1].clone();
-            self.apply_swap(&mut cfreach, player ^ 1, true);
-            self.evaluate(ret.spare_capacity_mut(), &node, player, &cfreach);
-            unsafe { ret.set_len(num_hands) };
-            ret
+
+            // When abstraction is enabled, evaluate returns bucket-level results
+            if self.abstraction_enabled {
+                let abs_data = self.abstraction_data.as_ref().unwrap();
+                let num_buckets = abs_data.num_buckets(player);
+                let num_opp_buckets = abs_data.num_buckets(player ^ 1);
+                let opp_hand_to_bucket = &abs_data.hand_to_bucket[player ^ 1];
+
+                // Aggregate hand-level weights to bucket-level cfreach
+                let mut hand_weights = self.weights[player ^ 1].clone();
+                self.apply_swap(&mut hand_weights, player ^ 1, true);
+
+                let mut bucket_cfreach = vec![0.0f32; num_opp_buckets];
+                for (hand_idx, &weight) in hand_weights.iter().enumerate() {
+                    let bucket_idx = opp_hand_to_bucket[hand_idx] as usize;
+                    bucket_cfreach[bucket_idx] += weight;
+                }
+
+                let mut bucket_result = Vec::with_capacity(num_buckets);
+                self.evaluate(bucket_result.spare_capacity_mut(), &node, player, &bucket_cfreach);
+                unsafe { bucket_result.set_len(num_buckets) };
+                expand_bucket_to_hand(bucket_result, 1)
+            } else {
+                let mut ret = Vec::with_capacity(num_hands);
+                let mut cfreach = self.weights[player ^ 1].clone();
+                self.apply_swap(&mut cfreach, player ^ 1, true);
+                self.evaluate(ret.spare_capacity_mut(), &node, player, &cfreach);
+                unsafe { ret.set_len(num_hands) };
+                ret
+            }
         } else if node.is_chance() && node.cfvalue_storage_player() == Some(player) {
-            if self.is_compression_enabled {
+            let bucket_values = if self.is_compression_enabled {
                 let slice = node.cfvalues_chance_compressed();
                 let scale = node.cfvalue_chance_scale();
                 decode_signed_slice(slice, scale)
             } else {
                 node.cfvalues_chance().to_vec()
-            }
+            };
+            expand_bucket_to_hand(bucket_values, 1)
         } else if node.has_cfvalues_ip() && player == PLAYER_IP as usize {
-            if self.is_compression_enabled {
+            let bucket_values = if self.is_compression_enabled {
                 let slice = node.cfvalues_ip_compressed();
                 let scale = node.cfvalue_ip_scale();
                 decode_signed_slice(slice, scale)
             } else {
                 node.cfvalues_ip().to_vec()
-            }
+            };
+            expand_bucket_to_hand(bucket_values, 1)
         } else if player == self.current_player() {
             have_actions = true;
-            if self.is_compression_enabled {
+            let num_actions = node.num_actions();
+            let bucket_values = if self.is_compression_enabled {
                 let slice = node.cfvalues_compressed();
                 let scale = node.cfvalue_scale();
                 decode_signed_slice(slice, scale)
             } else {
                 node.cfvalues().to_vec()
-            }
+            };
+            expand_bucket_to_hand(bucket_values, num_actions)
         } else {
             self.cfvalues_cache[player].to_vec()
         };
@@ -808,6 +879,9 @@ impl PostFlopGame {
     ///
     /// If a hand overlaps with the board, an undefined value is returned.
     ///
+    /// When abstraction is enabled, the internal bucket-level strategy is expanded to
+    /// hand-level strategy by mapping each hand to its bucket's strategy.
+    ///
     /// Panics if the current node is a terminal node or a chance node. Also, panics if the memory
     /// is not yet allocated.
     ///
@@ -830,10 +904,35 @@ impl PostFlopGame {
         let num_actions = node.num_actions();
         let num_hands = self.num_private_hands(player);
 
-        let mut ret = if self.is_compression_enabled {
+        // Get bucket-level strategy (when abstraction enabled) or hand-level strategy
+        let bucket_strategy = if self.is_compression_enabled {
             normalized_strategy_compressed(node.strategy_compressed(), num_actions)
         } else {
             normalized_strategy(node.strategy(), num_actions)
+        };
+
+        // Expand bucket strategy to hand strategy when abstraction is enabled
+        let mut ret = if let Some(abs_data) = &self.abstraction_data {
+            let num_buckets = abs_data.num_buckets(player);
+            let hand_to_bucket = &abs_data.hand_to_bucket[player];
+
+            // Create hand-level strategy array
+            let mut hand_strategy = vec![0.0f32; num_actions * num_hands];
+
+            // For each action, map bucket strategy to hand strategy
+            for action in 0..num_actions {
+                let bucket_row_start = action * num_buckets;
+                let hand_row_start = action * num_hands;
+
+                for (hand_idx, &bucket_idx) in hand_to_bucket.iter().enumerate() {
+                    hand_strategy[hand_row_start + hand_idx] =
+                        bucket_strategy[bucket_row_start + bucket_idx as usize];
+                }
+            }
+
+            hand_strategy
+        } else {
+            bucket_strategy
         };
 
         let locking = self.locking_strategy(&node);
