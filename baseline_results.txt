@@ -1,0 +1,124 @@
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/game/base.rs:24:13
+   |
+24 |     fn root(&self) -> MutexGuardLike<Self::Node> {
+   |             ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |             |
+   |             the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+24 |     fn root(&self) -> MutexGuardLike<'_, Self::Node> {
+   |                                      +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> src/game/interpreter.rs:997:13
+    |
+997 |     fn node(&self) -> MutexGuardLike<PostFlopNode> {
+    |             ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |             |
+    |             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+997 |     fn node(&self) -> MutexGuardLike<'_, PostFlopNode> {
+    |                                      +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/game/node.rs:38:13
+   |
+38 |     fn play(&self, action: usize) -> MutexGuardLike<Self> {
+   |             ^^^^^                    ^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |             |
+   |             the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+38 |     fn play(&self, action: usize) -> MutexGuardLike<'_, Self> {
+   |                                                     +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/interface.rs:13:13
+   |
+13 |     fn root(&self) -> MutexGuardLike<Self::Node>;
+   |             ^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |             |
+   |             the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+13 |     fn root(&self) -> MutexGuardLike<'_, Self::Node>;
+   |                                      +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> src/interface.rs:102:13
+    |
+102 |     fn play(&self, action: usize) -> MutexGuardLike<Self>;
+    |             ^^^^^                    ^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |             |
+    |             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+102 |     fn play(&self, action: usize) -> MutexGuardLike<'_, Self>;
+    |                                                     +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> src/mutex_like.rs:66:17
+   |
+66 |     pub fn lock(&self) -> MutexGuardLike<T> {
+   |                 ^^^^^     ^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                 |
+   |                 the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+66 |     pub fn lock(&self) -> MutexGuardLike<'_, T> {
+   |                                          +++
+
+warning: `postflop-solver` (lib) generated 6 warnings (run `cargo fix --lib -p postflop-solver` to apply 6 suggestions)
+   Compiling postflop-solver v0.1.0 (/Users/nuttakit/project/postflop-solver)
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running `target/release/examples/benchmark`
+=== Postflop Solver Benchmark ===
+Threads: 14 (set RAYON_NUM_THREADS to change)
+
+Building action tree...
+Tree built in 0.00s
+Creating game...
+Game created in 0.09s
+
+=== Game Info ===
+OOP hands: 773
+IP hands: 452
+Memory (uncompressed): 11728.68 MB
+Memory (compressed): 5950.67 MB
+
+Allocating memory (32-bit FP, no compression)...
+Memory allocated in 0.00s
+
+=== Solving ===
+Max iterations: 1000
+Target exploitability: 0.2750 (0.5% of pot)
+
+iteration: 0 / 1000 (exploitability = 4.9652e1)iteration: 1 / 1000 (exploitability = 4.9652e1)iteration: 2 / 1000 (exploitability = 4.9652e1)iteration: 3 / 1000 (exploitability = 4.9652e1)iteration: 4 / 1000 (exploitability = 4.9652e1)iteration: 5 / 1000 (exploitability = 4.9652e1)iteration: 6 / 1000 (exploitability = 4.9652e1)iteration: 7 / 1000 (exploitability = 4.9652e1)iteration: 8 / 1000 (exploitability = 4.9652e1)iteration: 9 / 1000 (exploitability = 4.9652e1)iteration: 10 / 1000 (exploitability = 1.6448e1)iteration: 11 / 1000 (exploitability = 1.6448e1)iteration: 12 / 1000 (exploitability = 1.6448e1)iteration: 13 / 1000 (exploitability = 1.6448e1)iteration: 14 / 1000 (exploitability = 1.6448e1)iteration: 15 / 1000 (exploitability = 1.6448e1)iteration: 16 / 1000 (exploitability = 1.6448e1)iteration: 17 / 1000 (exploitability = 1.6448e1)iteration: 18 / 1000 (exploitability = 1.6448e1)iteration: 19 / 1000 (exploitability = 1.6448e1)iteration: 20 / 1000 (exploitability = 1.0263e1)iteration: 21 / 1000 (exploitability = 1.0263e1)iteration: 22 / 1000 (exploitability = 1.0263e1)iteration: 23 / 1000 (exploitability = 1.0263e1)iteration: 24 / 1000 (exploitability = 1.0263e1)iteration: 25 / 1000 (exploitability = 1.0263e1)iteration: 26 / 1000 (exploitability = 1.0263e1)iteration: 27 / 1000 (exploitability = 1.0263e1)iteration: 28 / 1000 (exploitability = 1.0263e1)iteration: 29 / 1000 (exploitability = 1.0263e1)iteration: 30 / 1000 (exploitability = 3.2701e0)iteration: 31 / 1000 (exploitability = 3.2701e0)iteration: 32 / 1000 (exploitability = 3.2701e0)iteration: 33 / 1000 (exploitability = 3.2701e0)iteration: 34 / 1000 (exploitability = 3.2701e0)iteration: 35 / 1000 (exploitability = 3.2701e0)iteration: 36 / 1000 (exploitability = 3.2701e0)iteration: 37 / 1000 (exploitability = 3.2701e0)iteration: 38 / 1000 (exploitability = 3.2701e0)iteration: 39 / 1000 (exploitability = 3.2701e0)iteration: 40 / 1000 (exploitability = 1.9135e0)iteration: 41 / 1000 (exploitability = 1.9135e0)iteration: 42 / 1000 (exploitability = 1.9135e0)iteration: 43 / 1000 (exploitability = 1.9135e0)iteration: 44 / 1000 (exploitability = 1.9135e0)iteration: 45 / 1000 (exploitability = 1.9135e0)iteration: 46 / 1000 (exploitability = 1.9135e0)iteration: 47 / 1000 (exploitability = 1.9135e0)iteration: 48 / 1000 (exploitability = 1.9135e0)iteration: 49 / 1000 (exploitability = 1.9135e0)iteration: 50 / 1000 (exploitability = 1.3105e0)iteration: 51 / 1000 (exploitability = 1.3105e0)iteration: 52 / 1000 (exploitability = 1.3105e0)iteration: 53 / 1000 (exploitability = 1.3105e0)iteration: 54 / 1000 (exploitability = 1.3105e0)iteration: 55 / 1000 (exploitability = 1.3105e0)iteration: 56 / 1000 (exploitability = 1.3105e0)iteration: 57 / 1000 (exploitability = 1.3105e0)iteration: 58 / 1000 (exploitability = 1.3105e0)iteration: 59 / 1000 (exploitability = 1.3105e0)iteration: 60 / 1000 (exploitability = 9.8553e-1)iteration: 61 / 1000 (exploitability = 9.8553e-1)iteration: 62 / 1000 (exploitability = 9.8553e-1)iteration: 63 / 1000 (exploitability = 9.8553e-1)iteration: 64 / 1000 (exploitability = 9.8553e-1)iteration: 65 / 1000 (exploitability = 9.8553e-1)iteration: 66 / 1000 (exploitability = 9.8553e-1)iteration: 67 / 1000 (exploitability = 9.8553e-1)iteration: 68 / 1000 (exploitability = 9.8553e-1)iteration: 69 / 1000 (exploitability = 9.8553e-1)iteration: 70 / 1000 (exploitability = 1.3042e0)iteration: 71 / 1000 (exploitability = 1.3042e0)iteration: 72 / 1000 (exploitability = 1.3042e0)iteration: 73 / 1000 (exploitability = 1.3042e0)iteration: 74 / 1000 (exploitability = 1.3042e0)iteration: 75 / 1000 (exploitability = 1.3042e0)iteration: 76 / 1000 (exploitability = 1.3042e0)iteration: 77 / 1000 (exploitability = 1.3042e0)iteration: 78 / 1000 (exploitability = 1.3042e0)iteration: 79 / 1000 (exploitability = 1.3042e0)iteration: 80 / 1000 (exploitability = 5.4594e-1)iteration: 81 / 1000 (exploitability = 5.4594e-1)iteration: 82 / 1000 (exploitability = 5.4594e-1)iteration: 83 / 1000 (exploitability = 5.4594e-1)iteration: 84 / 1000 (exploitability = 5.4594e-1)iteration: 85 / 1000 (exploitability = 5.4594e-1)iteration: 86 / 1000 (exploitability = 5.4594e-1)iteration: 87 / 1000 (exploitability = 5.4594e-1)iteration: 88 / 1000 (exploitability = 5.4594e-1)iteration: 89 / 1000 (exploitability = 5.4594e-1)iteration: 90 / 1000 (exploitability = 4.1479e-1)iteration: 91 / 1000 (exploitability = 4.1479e-1)iteration: 92 / 1000 (exploitability = 4.1479e-1)iteration: 93 / 1000 (exploitability = 4.1479e-1)iteration: 94 / 1000 (exploitability = 4.1479e-1)iteration: 95 / 1000 (exploitability = 4.1479e-1)iteration: 96 / 1000 (exploitability = 4.1479e-1)iteration: 97 / 1000 (exploitability = 4.1479e-1)iteration: 98 / 1000 (exploitability = 4.1479e-1)iteration: 99 / 1000 (exploitability = 4.1479e-1)iteration: 100 / 1000 (exploitability = 3.2589e-1)iteration: 101 / 1000 (exploitability = 3.2589e-1)iteration: 102 / 1000 (exploitability = 3.2589e-1)iteration: 103 / 1000 (exploitability = 3.2589e-1)iteration: 104 / 1000 (exploitability = 3.2589e-1)iteration: 105 / 1000 (exploitability = 3.2589e-1)iteration: 106 / 1000 (exploitability = 3.2589e-1)iteration: 107 / 1000 (exploitability = 3.2589e-1)iteration: 108 / 1000 (exploitability = 3.2589e-1)iteration: 109 / 1000 (exploitability = 3.2589e-1)iteration: 110 / 1000 (exploitability = 2.4770e-1)
+
+=== Results ===
+Solve time: 84.38s (84377 ms)
+Final exploitability: 0.2477
+Exploitability as % of pot: 0.450%
+
+=== Benchmark Targets ===
+Target (14 CPU): 135s (2:15)
+Target (32 CPU): 60s (1:00)
+Actual time: 84.38s
+
+✓ PASS: Within 14 CPU target!
+  Projected 32 CPU time: 37s

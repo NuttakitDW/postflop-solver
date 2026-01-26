@@ -88,8 +88,7 @@ fn main() {
     let exploitability = solve(&mut game, max_iterations, target_exploitability, true);
     let solve_time = solve_start.elapsed();
 
-    // Finalize
-    finalize(&mut game);
+    // Note: solve() already calls finalize() internally
 
     // Results
     println!();
