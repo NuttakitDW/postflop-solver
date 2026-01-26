@@ -253,13 +253,13 @@ pub fn finalize<T: Game>(game: &mut T) {
 
     // compute the expected values and save them
     for player in 0..2 {
-        let mut cfvalues = Vec::with_capacity(game.num_private_hands(player));
+        let mut cfvalues = Vec::with_capacity(game.effective_num_hands(player));
         compute_cfvalue_recursive(
             cfvalues.spare_capacity_mut(),
             game,
             &mut game.root(),
             player,
-            game.initial_weights(player ^ 1),
+            game.effective_initial_weights(player ^ 1),
             true,
         );
     }
@@ -301,11 +301,11 @@ pub fn compute_current_ev<T: Game>(game: &T) -> [f32; 2] {
     }
 
     let mut cfvalues = [
-        Vec::with_capacity(game.num_private_hands(0)),
-        Vec::with_capacity(game.num_private_hands(1)),
+        Vec::with_capacity(game.effective_num_hands(0)),
+        Vec::with_capacity(game.effective_num_hands(1)),
     ];
 
-    let reach = [game.initial_weights(0), game.initial_weights(1)];
+    let reach = [game.effective_initial_weights(0), game.effective_initial_weights(1)];
 
     for player in 0..2 {
         compute_cfvalue_recursive(
@@ -316,7 +316,7 @@ pub fn compute_current_ev<T: Game>(game: &T) -> [f32; 2] {
             reach[player ^ 1],
             false,
         );
-        unsafe { cfvalues[player].set_len(game.num_private_hands(player)) };
+        unsafe { cfvalues[player].set_len(game.effective_num_hands(player)) };
     }
 
     let get_sum = |player: usize| weighted_sum(&cfvalues[player], reach[player]);
@@ -334,11 +334,11 @@ pub fn compute_mes_ev<T: Game>(game: &T) -> [f32; 2] {
     }
 
     let mut cfvalues = [
-        Vec::with_capacity(game.num_private_hands(0)),
-        Vec::with_capacity(game.num_private_hands(1)),
+        Vec::with_capacity(game.effective_num_hands(0)),
+        Vec::with_capacity(game.effective_num_hands(1)),
     ];
 
-    let reach = [game.initial_weights(0), game.initial_weights(1)];
+    let reach = [game.effective_initial_weights(0), game.effective_initial_weights(1)];
 
     for player in 0..2 {
         compute_best_cfv_recursive(
@@ -348,7 +348,7 @@ pub fn compute_mes_ev<T: Game>(game: &T) -> [f32; 2] {
             player,
             reach[player ^ 1],
         );
-        unsafe { cfvalues[player].set_len(game.num_private_hands(player)) };
+        unsafe { cfvalues[player].set_len(game.effective_num_hands(player)) };
     }
 
     let get_sum = |player: usize| weighted_sum(&cfvalues[player], reach[player]);
@@ -577,7 +577,7 @@ fn compute_best_cfv_recursive<T: Game>(
     }
 
     let num_actions = node.num_actions();
-    let num_hands = game.num_private_hands(player);
+    let num_hands = result.len(); // Use result.len() like compute_cfvalue_recursive does
 
     // simply recurse when the number of actions is one
     if num_actions == 1 && !node.is_chance() {

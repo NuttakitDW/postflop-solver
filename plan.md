@@ -108,39 +108,44 @@
 
 ---
 
-### Phase 4: Solver Modification
+### Phase 4: Solver Modification ✅ COMPLETE
 
-- [ ] **4.1** Add abstracted reach propagation
-  - `cfreach` array sized by buckets, not hands
-  - **Test**: Array sizes match num_buckets
+- [x] **4.1** Add abstracted reach propagation
+  - Added `effective_num_hands()` and `effective_initial_weights()` to Game trait
+  - Solver uses bucket counts for array sizing
+  - **Test**: Array sizes match num_buckets ✓
 
-- [ ] **4.2** Modify regret matching for buckets
-  - Strategy/regret arrays indexed by bucket
-  - **Test**: Strategy sums to 1.0 per bucket
+- [x] **4.2** Modify regret matching for buckets
+  - Strategy/regret arrays indexed by bucket (via node.num_elements)
+  - Existing regret matching works with any array size
+  - **Test**: Strategy sums to 1.0 per bucket ✓
 
-- [ ] **4.3** Add bucket-based CFV aggregation
-  - When computing CFV at decision nodes
-  - **Test**: CFV values are reasonable (not NaN/inf)
+- [x] **4.3** Add bucket-based CFV aggregation
+  - CFV computed per bucket at decision nodes
+  - Uses effective_num_hands for result array sizing
+  - **Test**: CFV values are finite (not NaN/inf) ✓
 
-- [ ] **4.4** Test solver iteration (no evaluation yet)
-  - Run 10 iterations with stubbed evaluation
-  - **Test**: No crashes, memory stable
+- [x] **4.4** Test solver iteration
+  - Run 10+ iterations with abstraction enabled
+  - Different bucket sizes (k=5,10,20,30) all work
+  - **Test**: No crashes, memory stable ✓
 
 ---
 
 ### Phase 5: Bucket-Based Evaluation
 
-- [ ] **5.1** Add `evaluate_internal_abstracted()` function
+- [x] **5.1** Add `evaluate_internal_abstracted()` function
   - Uses precomputed bucket_equity tables
   - O(k²) instead of O(n²)
-  - **Test**: Compiles, returns values
+  - **Test**: Compiles, returns values ✓
 
-- [ ] **5.2** Route terminal nodes to abstracted evaluation
-  - Check `abstraction_enabled` flag
-  - **Test**: Correct function called based on mode
+- [x] **5.2** Route terminal nodes to abstracted evaluation
+  - Check `abstraction_enabled` flag in evaluate()
+  - **Test**: Correct function called based on mode ✓
 
 - [ ] **5.3** Verify evaluation correctness
   - Compare bucket eval vs full eval for single node
+  - Current issue: exploitability is high due to simplified evaluation
   - **Test**: Results within 5% for same position
 
 - [ ] **5.4** Full solve with abstraction
@@ -193,12 +198,15 @@
 | `src/abstraction.rs` | CREATE | 1, 2 | ✅ Done |
 | `src/lib.rs` | MODIFY (export) | 1 | ✅ Done |
 | `src/game/mod.rs` | MODIFY (add fields) | 3 | ✅ Done |
-| `src/game/base.rs` | MODIFY (add methods) | 3 | ✅ Done |
-| `src/solver.rs` | MODIFY (bucket arrays) | 4 | Pending |
-| `src/game/evaluation.rs` | MODIFY (add abstracted eval) | 5 | Pending |
+| `src/game/base.rs` | MODIFY (add methods) | 3, 4 | ✅ Done |
+| `src/interface.rs` | MODIFY (add trait methods) | 4 | ✅ Done |
+| `src/solver.rs` | MODIFY (bucket arrays) | 4 | ✅ Done |
+| `src/utility.rs` | MODIFY (effective methods) | 4 | ✅ Done |
+| `src/game/evaluation.rs` | MODIFY (add abstracted eval) | 5 | ✅ Done |
 | `examples/test_kmeans.rs` | CREATE | 1 | ✅ Done |
 | `examples/test_bucket_equity.rs` | CREATE | 2 | ✅ Done |
 | `examples/test_abstraction_memory.rs` | CREATE | 3 | ✅ Done |
+| `examples/test_solver_abstraction.rs` | CREATE | 4 | ✅ Done |
 | `examples/benchmark.rs` | MODIFY (add --buckets flag) | 7 | Pending |
 
 ---
@@ -216,5 +224,5 @@
 
 ## Current Status
 
-**Phase**: 3 complete ✅
-**Next Task**: 4.1 - Add abstracted reach propagation
+**Phase**: 4 complete ✅, Phase 5 in progress
+**Next Task**: 5.3 - Verify evaluation correctness (fix high exploitability)

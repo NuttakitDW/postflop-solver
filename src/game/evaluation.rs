@@ -11,6 +11,91 @@ fn min(x: f64, y: f64) -> f64 {
     }
 }
 
+/// Abstracted evaluation using precomputed bucket equity tables.
+///
+/// This function computes CFV for each bucket instead of each hand,
+/// using O(k²) operations instead of O(n²) where k is number of buckets.
+///
+/// Key insight: cfreach already incorporates bucket weights through the
+/// effective_initial_weights mechanism. We don't need to multiply by
+/// weights again here.
+impl PostFlopGame {
+    pub(super) fn evaluate_internal_abstracted(
+        &self,
+        result: &mut [MaybeUninit<f32>],
+        node: &PostFlopNode,
+        player: usize,
+        cfreach: &[f32],
+    ) {
+        let abstraction_data = self.abstraction_data.as_ref().unwrap();
+        let num_player_buckets = abstraction_data.num_buckets(player);
+        let num_opponent_buckets = abstraction_data.num_buckets(player ^ 1);
+
+        let pot = (self.tree_config.starting_pot + 2 * node.amount) as f64;
+        let half_pot = 0.5 * pot;
+        let rake = min(pot * self.tree_config.rake_rate, self.tree_config.rake_cap);
+
+        // Normalize by num_combinations like the original evaluation
+        let amount_win = ((half_pot - rake) / self.num_combinations) as f32;
+        let amount_lose = (-half_pot / self.num_combinations) as f32;
+
+        // Initialize result to zeros
+        result.iter_mut().for_each(|v| {
+            v.write(0.0);
+        });
+        let result = unsafe { &mut *(result as *mut _ as *mut [f32]) };
+
+        // Someone folded
+        if node.player & PLAYER_FOLD_FLAG == PLAYER_FOLD_FLAG {
+            let folded_player = node.player & PLAYER_MASK;
+            let payoff = if folded_player as usize != player {
+                amount_win
+            } else {
+                amount_lose
+            };
+
+            // Sum opponent reach probabilities (by bucket)
+            let cfreach_sum: f32 = cfreach[..num_opponent_buckets].iter().sum();
+
+            // In bucket abstraction, we ignore card blocking
+            // Each bucket gets: payoff * total_opponent_reach
+            for b in 0..num_player_buckets {
+                result[b] = payoff * cfreach_sum;
+            }
+        }
+        // Showdown
+        else {
+            // Get bucket equity for this runout
+            let bucket_equity = abstraction_data.get_bucket_equity(node.turn, node.river);
+
+            if let Some(equity_matrix) = bucket_equity {
+                // For each player bucket, compute weighted CFV
+                for player_bucket in 0..num_player_buckets {
+                    let mut cfv = 0.0f32;
+
+                    for opp_bucket in 0..num_opponent_buckets {
+                        let opp_reach = cfreach[opp_bucket];
+                        if opp_reach > 0.0 {
+                            // equity[player_bucket][opp_bucket] is player's equity
+                            let equity = equity_matrix[player_bucket][opp_bucket];
+                            // CFV = reach * (equity * win + (1-equity) * lose)
+                            let value = equity * amount_win + (1.0 - equity) * amount_lose;
+                            cfv += opp_reach * value;
+                        }
+                    }
+
+                    result[player_bucket] = cfv;
+                }
+            } else {
+                // No equity data for this runout (shouldn't happen normally)
+                for b in 0..num_player_buckets {
+                    result[b] = 0.0;
+                }
+            }
+        }
+    }
+}
+
 impl PostFlopGame {
     pub(super) fn evaluate_internal(
         &self,

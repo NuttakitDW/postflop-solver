@@ -16,9 +16,33 @@ pub trait Game: Send + Sync {
     #[doc(hidden)]
     fn num_private_hands(&self, player: usize) -> usize;
 
+    /// Returns the effective number of hands for solver operations.
+    ///
+    /// When hand abstraction is enabled, this returns the number of buckets.
+    /// Otherwise, it returns the number of private hands.
+    #[doc(hidden)]
+    fn effective_num_hands(&self, player: usize) -> usize {
+        self.num_private_hands(player)
+    }
+
     /// Returns the initial reach probabilities of given player.
     #[doc(hidden)]
     fn initial_weights(&self, player: usize) -> &[f32];
+
+    /// Returns the effective initial weights for solver operations.
+    ///
+    /// When hand abstraction is enabled, this returns the bucket weights.
+    /// Otherwise, it returns the initial hand weights.
+    #[doc(hidden)]
+    fn effective_initial_weights(&self, player: usize) -> &[f32] {
+        self.initial_weights(player)
+    }
+
+    /// Returns whether hand abstraction is enabled.
+    #[doc(hidden)]
+    fn is_abstraction_enabled(&self) -> bool {
+        false
+    }
 
     /// Computes the counterfactual values of given node.
     #[doc(hidden)]

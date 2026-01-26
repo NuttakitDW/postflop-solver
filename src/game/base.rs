@@ -43,7 +43,9 @@ impl Game for PostFlopGame {
         player: usize,
         cfreach: &[f32],
     ) {
-        if self.bunching_num_dead_cards == 0 {
+        if self.abstraction_enabled {
+            self.evaluate_internal_abstracted(result, node, player, cfreach);
+        } else if self.bunching_num_dead_cards == 0 {
             self.evaluate_internal(result, node, player, cfreach);
         } else {
             self.evaluate_internal_bunching(result, node, player, cfreach);
@@ -83,6 +85,11 @@ impl Game for PostFlopGame {
 
     #[inline]
     fn isomorphic_chances(&self, node: &Self::Node) -> &[u8] {
+        // Disable isomorphism when abstraction is enabled
+        // because swap lists use hand indices, not bucket indices
+        if self.abstraction_enabled {
+            return &[];
+        }
         if node.turn == NOT_DEALT {
             &self.isomorphism_ref_turn
         } else {
@@ -113,6 +120,27 @@ impl Game for PostFlopGame {
     #[inline]
     fn is_compression_enabled(&self) -> bool {
         self.is_compression_enabled
+    }
+
+    #[inline]
+    fn effective_num_hands(&self, player: usize) -> usize {
+        self.effective_hand_count(player)
+    }
+
+    #[inline]
+    fn effective_initial_weights(&self, player: usize) -> &[f32] {
+        if self.abstraction_enabled {
+            self.abstraction_data
+                .as_ref()
+                .map_or(&self.initial_weights[player], |data| &data.bucket_weights[player])
+        } else {
+            &self.initial_weights[player]
+        }
+    }
+
+    #[inline]
+    fn is_abstraction_enabled(&self) -> bool {
+        self.abstraction_enabled
     }
 }
 
