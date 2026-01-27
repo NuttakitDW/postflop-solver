@@ -56,10 +56,21 @@ pub fn solve<T: Game>(
 
     let mut root = game.root();
     let mut exploitability = compute_exploitability(game);
+    let starting_pot = game.starting_pot() as f32;
+    let target_percent = if starting_pot > 0.0 {
+        target_exploitability / starting_pot * 100.0
+    } else {
+        0.0
+    };
 
     if print_progress {
         print!("iteration: 0 / {max_num_iterations} ");
-        print!("(exploitability = {exploitability:.4e})");
+        if starting_pot > 0.0 {
+            let current_percent = exploitability / starting_pot * 100.0;
+            print!("(exploitability = {current_percent:.2}% | target = {target_percent:.2}%)");
+        } else {
+            print!("(exploitability = {exploitability:.4e})");
+        }
         io::stdout().flush().unwrap();
     }
 
@@ -89,7 +100,12 @@ pub fn solve<T: Game>(
 
         if print_progress {
             print!("\riteration: {} / {} ", t + 1, max_num_iterations);
-            print!("(exploitability = {exploitability:.4e})");
+            if starting_pot > 0.0 {
+                let current_percent = exploitability / starting_pot * 100.0;
+                print!("(exploitability = {current_percent:.2}% | target = {target_percent:.2}%)");
+            } else {
+                print!("(exploitability = {exploitability:.4e})");
+            }
             io::stdout().flush().unwrap();
         }
     }

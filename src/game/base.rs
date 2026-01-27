@@ -142,6 +142,11 @@ impl Game for PostFlopGame {
     fn is_abstraction_enabled(&self) -> bool {
         self.abstraction_enabled
     }
+
+    #[inline]
+    fn starting_pot(&self) -> i32 {
+        self.tree_config.starting_pot
+    }
 }
 
 impl PostFlopGame {

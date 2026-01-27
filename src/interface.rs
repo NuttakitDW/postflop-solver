@@ -101,6 +101,12 @@ pub trait Game: Send + Sync {
     fn is_compression_enabled(&self) -> bool {
         false
     }
+
+    /// Returns the starting pot size for calculating exploitability percentage.
+    #[doc(hidden)]
+    fn starting_pot(&self) -> i32 {
+        0
+    }
 }
 
 /// The trait representing a node in game tree.
