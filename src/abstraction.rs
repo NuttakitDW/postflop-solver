@@ -646,14 +646,16 @@ fn compute_bucket_value_for_runout(
     hand_to_bucket: &[Vec<u16>; 2],
     num_buckets: [usize; 2],
     board_mask: u64,
+    initial_weights: [&[f32]; 2],
 ) -> (Vec<Vec<f32>>, Vec<Vec<u32>>) {
     let oop_strength = &hand_strength[0];
     let ip_strength = &hand_strength[1];
 
     // Accumulators: wins[oop_bucket][ip_bucket], ties, total
-    let mut wins = vec![vec![0u64; num_buckets[1]]; num_buckets[0]];
-    let mut ties = vec![vec![0u64; num_buckets[1]]; num_buckets[0]];
-    let mut total = vec![vec![0u64; num_buckets[1]]; num_buckets[0]];
+    // Using f64 for weighted accumulation
+    let mut wins = vec![vec![0.0f64; num_buckets[1]]; num_buckets[0]];
+    let mut ties = vec![vec![0.0f64; num_buckets[1]]; num_buckets[0]];
+    let mut total = vec![vec![0.0f64; num_buckets[1]]; num_buckets[0]];
 
     // Build valid hands list for each player (excluding sentinels and card conflicts)
     let valid_oop: Vec<_> = oop_strength
@@ -680,9 +682,10 @@ fn compute_bucket_value_for_runout(
         .filter(|(_, _, mask)| mask & board_mask == 0)
         .collect();
 
-    // Compare all OOP hands against all IP hands
+    // Compare all OOP hands against all IP hands with range weighting
     for &(oop_str, oop_hand, oop_mask) in &valid_oop {
         let oop_bucket = hand_to_bucket[0][oop_hand] as usize;
+        let oop_weight = initial_weights[0][oop_hand] as f64;
 
         for &(ip_str, ip_hand, ip_mask) in &valid_ip {
             // Skip if hands share cards
@@ -691,12 +694,15 @@ fn compute_bucket_value_for_runout(
             }
 
             let ip_bucket = hand_to_bucket[1][ip_hand] as usize;
-            total[oop_bucket][ip_bucket] += 1;
+            let ip_weight = initial_weights[1][ip_hand] as f64;
+            let pair_weight = oop_weight * ip_weight;
+
+            total[oop_bucket][ip_bucket] += pair_weight;
 
             if oop_str > ip_str {
-                wins[oop_bucket][ip_bucket] += 1;
+                wins[oop_bucket][ip_bucket] += pair_weight;
             } else if oop_str == ip_str {
-                ties[oop_bucket][ip_bucket] += 1;
+                ties[oop_bucket][ip_bucket] += pair_weight;
             }
         }
     }
@@ -708,11 +714,11 @@ fn compute_bucket_value_for_runout(
 
     for oop_b in 0..num_buckets[0] {
         for ip_b in 0..num_buckets[1] {
-            matchups[oop_b][ip_b] = total[oop_b][ip_b] as u32;
-            if total[oop_b][ip_b] > 0 {
-                let eq = (wins[oop_b][ip_b] as f64
-                    + 0.5 * ties[oop_b][ip_b] as f64)
-                    / total[oop_b][ip_b] as f64;
+            // Convert weighted total to approximate matchup count for card blocking
+            matchups[oop_b][ip_b] = total[oop_b][ip_b].round() as u32;
+            if total[oop_b][ip_b] > 0.0 {
+                let eq = (wins[oop_b][ip_b] + 0.5 * ties[oop_b][ip_b])
+                    / total[oop_b][ip_b];
                 // Store normalized value: 2*equity - 1
                 value[oop_b][ip_b] = (2.0 * eq - 1.0) as f32;
             } else {
@@ -743,6 +749,12 @@ fn precompute_bucket_value(
     let private_cards: [Vec<(Card, Card)>; 2] = [
         game.private_cards(0).to_vec(),
         game.private_cards(1).to_vec(),
+    ];
+
+    // Get initial weights for range-weighted equity computation
+    let initial_weights: [&[f32]; 2] = [
+        game.initial_weights(0),
+        game.initial_weights(1),
     ];
 
     let flop_mask: u64 = (1 << card_config.flop[0])
@@ -776,6 +788,7 @@ fn precompute_bucket_value(
                 hand_to_bucket,
                 num_buckets,
                 board_mask,
+                initial_weights,
             );
             runout_to_index[pair_idx] = 0;
             bucket_value.push(value);
@@ -804,6 +817,7 @@ fn precompute_bucket_value(
                 hand_to_bucket,
                 num_buckets,
                 board_mask,
+                initial_weights,
             );
             runout_to_index[pair_idx] = bucket_value.len() as i32;
             bucket_value.push(value);
@@ -834,6 +848,7 @@ fn precompute_bucket_value(
                     hand_to_bucket,
                     num_buckets,
                     board_mask,
+                    initial_weights,
                 );
                 runout_to_index[pair_idx] = bucket_value.len() as i32;
                 bucket_value.push(value);
