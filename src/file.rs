@@ -17,8 +17,45 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
+#[cfg(feature = "logging")]
+use std::time::Instant;
+
 const MAGIC: u32 = 0x09f15790;
 const VERSION: u8 = 1;
+
+/// Macro for conditional logging
+#[cfg(feature = "logging")]
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        log::info!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_info {
+    ($($arg:tt)*) => {};
+}
+
+/// File metadata without full load
+#[derive(Debug, Clone)]
+pub struct FileInfo {
+    pub version: u8,
+    pub compression_type: u8,
+    pub data_type: u8,
+    pub estimated_memory_usage: u64,
+    pub memo: String,
+    pub file_size: u64,
+}
+
+/// Timing breakdown for file loading
+#[derive(Debug, Clone, Default)]
+pub struct LoadTimings {
+    pub header_ms: u64,
+    pub decompression_ms: u64,
+    pub deserialization_ms: u64,
+    pub init_ms: u64,
+    pub total_ms: u64,
+}
 
 #[doc(hidden)]
 pub enum DataType {
@@ -164,20 +201,26 @@ pub fn load_data_from_std_read<T: FileData, R: Read>(
     reader: &mut R,
     max_memory_usage: Option<u64>,
 ) -> Result<(T, String), String> {
+    #[cfg(feature = "logging")]
+    let start = Instant::now();
+
     let magic: u32 = decode_from_std_read(reader, "Failed to read magic number")?;
     if magic != MAGIC {
         return Err("Magic number is invalid".to_string());
     }
+    log_info!("[LOAD] Magic number validated");
 
     let version: u8 = decode_from_std_read(reader, "Failed to read version number")?;
     if version != VERSION {
         return Err("Version number is invalid".to_string());
     }
+    log_info!("[LOAD] Version: {}", version);
 
     let compression_type: u8 = decode_from_std_read(reader, "Failed to read compression type")?;
     if compression_type > 1 {
         return Err("Compression type is invalid".to_string());
     }
+    log_info!("[LOAD] Compression: {}", if compression_type == 0 { "none" } else { "zstd" });
 
     #[cfg(not(feature = "zstd"))]
     if compression_type == 1 {
@@ -188,15 +231,31 @@ pub fn load_data_from_std_read<T: FileData, R: Read>(
     if data_type != T::data_type() as u8 {
         return Err("Data type is invalid".to_string());
     }
+    log_info!("[LOAD] Data type: {}", data_type);
 
     let estimated_memory_usage: u64 = decode_from_std_read(reader, "Failed to read memory usage")?;
+    log_info!("[LOAD] Estimated memory: {} MB", estimated_memory_usage / 1_048_576);
+
     if let Some(max_memory_usage) = max_memory_usage {
         if estimated_memory_usage > max_memory_usage {
-            return Err("Estimated memory usage is too large".to_string());
+            return Err(format!(
+                "Estimated memory usage ({} MB) exceeds limit ({} MB)",
+                estimated_memory_usage / 1_048_576,
+                max_memory_usage / 1_048_576
+            ));
         }
     }
 
     let memo: String = decode_from_std_read(reader, "Failed to read memo")?;
+    log_info!("[LOAD] Memo length: {} chars", memo.len());
+
+    log_info!(
+        "[LOAD] Starting {}...",
+        if compression_type == 0 { "deserialization" } else { "decompression + deserialization" }
+    );
+
+    #[cfg(feature = "logging")]
+    let decompress_start = Instant::now();
 
     #[cfg(not(feature = "zstd"))]
     let data: T = decode_from_std_read(reader, "Failed to read data")?;
@@ -209,7 +268,58 @@ pub fn load_data_from_std_read<T: FileData, R: Read>(
         decode_from_std_read(&mut zstd_decoder, "Failed to read data")?
     };
 
+    #[cfg(feature = "logging")]
+    {
+        let decompress_elapsed = decompress_start.elapsed();
+        let total_elapsed = start.elapsed();
+        log_info!(
+            "[LOAD] Complete! Deserialization took {:?}, total {:?}",
+            decompress_elapsed,
+            total_elapsed
+        );
+    }
+
     Ok((data, memo))
+}
+
+/// Read file header without loading the full game tree.
+///
+/// This is useful for pre-validation before committing to a full load,
+/// such as checking memory requirements or file metadata.
+pub fn read_file_info<P: AsRef<Path>>(path: P) -> Result<FileInfo, String> {
+    let file = File::open(path.as_ref()).map_err(|e| format!("Failed to open file: {}", e))?;
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut reader = BufReader::new(file);
+
+    let magic: u32 = decode_from_std_read(&mut reader, "Failed to read magic number")?;
+    if magic != MAGIC {
+        return Err("Magic number is invalid".to_string());
+    }
+
+    let version: u8 = decode_from_std_read(&mut reader, "Failed to read version number")?;
+    if version != VERSION {
+        return Err("Version number is invalid".to_string());
+    }
+
+    let compression_type: u8 = decode_from_std_read(&mut reader, "Failed to read compression type")?;
+    if compression_type > 1 {
+        return Err("Compression type is invalid".to_string());
+    }
+
+    let data_type: u8 = decode_from_std_read(&mut reader, "Failed to read data type")?;
+
+    let estimated_memory_usage: u64 = decode_from_std_read(&mut reader, "Failed to read memory usage")?;
+
+    let memo: String = decode_from_std_read(&mut reader, "Failed to read memo")?;
+
+    Ok(FileInfo {
+        version,
+        compression_type,
+        data_type,
+        estimated_memory_usage,
+        memo,
+        file_size,
+    })
 }
 
 /// Loads data from a file.

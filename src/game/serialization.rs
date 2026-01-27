@@ -11,6 +11,19 @@ use bincode::{
     error::{DecodeError, EncodeError},
 };
 
+/// Macro for conditional logging
+#[cfg(feature = "logging")]
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        log::info!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_info {
+    ($($arg:tt)*) => {};
+}
+
 impl PostFlopGame {
     /// Returns the storage mode of this instance.
     ///
@@ -180,6 +193,8 @@ impl Encode for PostFlopGame {
 
 impl<Context> Decode<Context> for PostFlopGame {
     fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        log_info!("[DECODE] Starting PostFlopGame decode...");
+
         // version check
         let version = String::decode(decoder)?;
         if version != VERSION_STR {
@@ -187,7 +202,9 @@ impl<Context> Decode<Context> for PostFlopGame {
                 "Version mismatch: expected '{VERSION_STR}', but got '{version}'"
             )));
         }
+        log_info!("[DECODE] PostFlopGame version: {}", version);
 
+        log_info!("[DECODE] Decoding game configuration...");
         // game instance
         let mut game = Self {
             state: Decode::decode(decoder)?,
@@ -213,12 +230,31 @@ impl<Context> Decode<Context> for PostFlopGame {
             ..Default::default()
         };
 
+        log_info!(
+            "[DECODE] Allocated storage: {}MB + {}MB + {}MB (chance: {}MB)",
+            game.storage1.len() / 1_048_576,
+            game.storage2.len() / 1_048_576,
+            game.storage_ip.len() / 1_048_576,
+            game.storage_chance.len() / 1_048_576
+        );
+        log_info!(
+            "[DECODE] Compression: {}, abstraction: {}",
+            game.is_compression_enabled,
+            game.abstraction_enabled
+        );
+
         game.target_storage_mode = game.storage_mode;
         if game.storage_mode == BoardState::River && game.state >= State::MemoryAllocated {
             let num_bytes = if game.is_compression_enabled { 2 } else { 4 };
             game.storage2 = vec![0; (num_bytes * game.num_storage) as usize];
             game.storage_ip = vec![0; (num_bytes * game.num_storage_ip) as usize];
             game.storage_chance = vec![0; (num_bytes * game.num_storage_chance) as usize];
+            log_info!(
+                "[DECODE] River storage allocated: {}MB + {}MB + {}MB",
+                game.storage2.len() / 1_048_576,
+                game.storage_ip.len() / 1_048_576,
+                game.storage_chance.len() / 1_048_576
+            );
         }
 
         // store base pointers
@@ -243,20 +279,30 @@ impl<Context> Decode<Context> for PostFlopGame {
         });
 
         // game tree
+        let total_nodes: u64 = game.num_nodes.iter().map(|&x| x as u64).sum();
+        log_info!("[DECODE] Decoding {} nodes (this may take a while)...", total_nodes);
         game.node_arena = Decode::decode(decoder)?;
+        log_info!("[DECODE] Node arena decoded: {} nodes", game.node_arena.len());
 
         // initialization
+        log_info!("[DECODE] Validating card config...");
         game.check_card_config().map_err(DecodeError::OtherString)?;
+
+        log_info!("[DECODE] Initializing card fields...");
         game.init_card_fields();
+
+        log_info!("[DECODE] Initializing interpreter...");
         game.init_interpreter();
         game.back_to_root();
 
         // restore the counterfactual values
         if game.storage_mode == BoardState::River && game.state == State::Solved {
+            log_info!("[DECODE] Finalizing (restoring counterfactual values)...");
             game.state = State::MemoryAllocated;
             finalize(&mut game);
         }
 
+        log_info!("[DECODE] PostFlopGame decode complete!");
         Ok(game)
     }
 }
