@@ -304,6 +304,44 @@ impl PostFlopGame {
         (uncompressed, compressed)
     }
 
+    /// Returns the estimated memory usage with abstraction enabled.
+    ///
+    /// This provides an estimate without actually enabling abstraction,
+    /// useful for UI display before the user commits to running the solver.
+    #[inline]
+    pub fn memory_usage_with_abstraction(&self, num_buckets: usize) -> (u64, u64) {
+        if self.state <= State::Uninitialized {
+            panic!("Game is not successfully initialized");
+        }
+
+        // If abstraction is already enabled, just return current memory usage
+        if self.abstraction_enabled {
+            return self.memory_usage();
+        }
+
+        // Calculate the scaling factor based on bucket count vs hand count
+        // Memory is roughly proportional to (hands_oop * hands_ip) for strategy storage
+        let hands_oop = self.num_private_hands(0) as f64;
+        let hands_ip = self.num_private_hands(1) as f64;
+        let buckets = num_buckets as f64;
+
+        // The scaling factor for the main storage components
+        // Storage scales with bucket_count instead of hand_count for each player
+        let scale_factor = (buckets * buckets) / (hands_oop * hands_ip);
+
+        // Current memory usage components
+        let current_elements = 2 * self.num_storage + self.num_storage_ip + self.num_storage_chance;
+
+        // Estimate new elements with abstraction
+        // The misc_memory_usage is largely fixed (tree structure, etc.)
+        let estimated_elements = (current_elements as f64 * scale_factor) as u64;
+
+        let uncompressed = 4 * estimated_elements + self.misc_memory_usage;
+        let compressed = 2 * estimated_elements + self.misc_memory_usage;
+
+        (uncompressed, compressed)
+    }
+
     /// Returns the estimated additional memory usage in bytes when the bunching effect is enabled.
     #[inline]
     pub fn memory_usage_bunching(&self) -> u64 {
