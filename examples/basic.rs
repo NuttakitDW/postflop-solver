@@ -32,6 +32,7 @@ fn main() {
         add_allin_threshold: 1.5, // add all-in if (maximum bet size) <= 1.5x pot
         force_allin_threshold: 0.15, // force all-in if (SPR after the opponent's call) <= 0.15
         merging_threshold: 0.1,
+        max_raises_per_street: 0, // 0 = unlimited, 5 = GTO Wizard default
     };
 
     // build the game tree

@@ -81,11 +81,15 @@ struct TreeSettings {
     /// Threshold as percentage (e.g., 10 = 0.1x)
     #[serde(default = "default_merging")]
     merging_threshold: f64,
+    /// Maximum raises per street (0 = unlimited, 5 = GTO Wizard default)
+    #[serde(default = "default_max_raises")]
+    max_raises_per_street: i32,
 }
 
 fn default_add_allin() -> f64 { 150.0 }
 fn default_force_allin() -> f64 { 20.0 }
 fn default_merging() -> f64 { 10.0 }
+fn default_max_raises() -> i32 { 0 }
 
 /// Solver settings
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,6 +184,7 @@ fn generate_template() -> SolverConfig {
             add_all_in_threshold: 150.0,
             force_all_in_threshold: 20.0,
             merging_threshold: 10.0,
+            max_raises_per_street: 0, // 0 = unlimited, 5 = GTO Wizard default
         },
         solver: SolverSettings {
             max_iterations: 1000,
@@ -407,6 +412,7 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         add_allin_threshold,
         force_allin_threshold,
         merging_threshold,
+        max_raises_per_street: config.tree.max_raises_per_street,
     };
 
     // Build action tree

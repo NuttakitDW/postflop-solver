@@ -29,6 +29,7 @@ fn main() {
         add_allin_threshold: 1.5,
         force_allin_threshold: 0.15,
         merging_threshold: 0.1,
+        max_raises_per_street: 0, // 0 = unlimited
     };
 
     let action_tree = ActionTree::new(tree_config).unwrap();

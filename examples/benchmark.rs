@@ -43,6 +43,7 @@ fn main() {
         add_allin_threshold: 1.5,       // 150%
         force_allin_threshold: 0.2,     // 20%
         merging_threshold: 0.1,         // 10%
+        max_raises_per_street: 0,       // 0 = unlimited
     };
 
     // Build action tree

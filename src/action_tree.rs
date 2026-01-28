@@ -131,6 +131,14 @@ pub struct TreeConfig {
     ///
     /// Personal recommendation: around `0.1`
     pub merging_threshold: f64,
+
+    /// Maximum number of raises allowed per street (set `0` for unlimited).
+    ///
+    /// GTO Wizard uses a default of 5 raises per street. This prevents infinite raise loops
+    /// in deep stack scenarios and ensures consistent tree structures for comparison.
+    ///
+    /// When this limit is reached, only call, fold, and all-in actions are available.
+    pub max_raises_per_street: i32,
 }
 
 /// A struct representing an abstract game tree.
@@ -625,7 +633,12 @@ impl ActionTree {
             // call
             actions.push(Action::Call);
 
-            if !info.allin_flag {
+            // Check if raises are allowed (not all-in and under max raises limit)
+            let raises_allowed = !info.allin_flag
+                && (self.config.max_raises_per_street == 0
+                    || info.num_bets < self.config.max_raises_per_street);
+
+            if raises_allowed {
                 // raise
                 for &bet_size in &bet_options[player as usize].raise {
                     match bet_size {
@@ -653,8 +666,10 @@ impl ActionTree {
                         BetSize::AllIn => actions.push(Action::AllIn(max_amount)),
                     }
                 }
+            }
 
-                // all-in
+            // all-in is always available (even when max raises reached) unless opponent is all-in
+            if !info.allin_flag {
                 let allin_threshold = pot as f64 * self.config.add_allin_threshold;
                 if max_amount <= prev_amount + allin_threshold.round() as i32 {
                     actions.push(Action::AllIn(max_amount));

@@ -32,7 +32,8 @@
     "donkOption": 0,
     "addAllInThreshold": 50,
     "forceAllInThreshold": 90,
-    "mergingThreshold": 10
+    "mergingThreshold": 10,
+    "maxRaisesPerStreet": 5
   },
   "solver": {
     "maxIterations": 1000,
