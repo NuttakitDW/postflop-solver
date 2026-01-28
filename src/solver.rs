@@ -8,37 +8,28 @@ use std::mem::MaybeUninit;
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
 
-struct DiscountParams {
-    alpha_t: f32,
-    beta_t: f32,
-    gamma_t: f32,
+/// Parameters for CFR+ algorithm.
+///
+/// CFR+ uses:
+/// - Regret matching+: floor cumulative regrets to 0
+/// - Linear averaging: weight strategy by iteration number
+struct CfrPlusParams {
+    /// Current iteration number (1-indexed for strategy weighting)
+    iteration: u32,
 }
 
-impl DiscountParams {
+impl CfrPlusParams {
     pub fn new(current_iteration: u32) -> Self {
-        // 0, 1, 4, 16, 64, 256, ...
-        let nearest_lower_power_of_4 = match current_iteration {
-            0 => 0,
-            x => 1 << ((x.leading_zeros() ^ 31) & !1),
-        };
-
-        let t_alpha = (current_iteration as i32 - 1).max(0) as f64;
-        let t_gamma = (current_iteration - nearest_lower_power_of_4) as f64;
-
-        let pow_alpha = t_alpha * t_alpha.sqrt();
-        let pow_gamma = (t_gamma / (t_gamma + 1.0)).powi(3);
-
+        // iteration is 1-indexed (matching slumbot2019 which starts from iteration 1)
         Self {
-            alpha_t: (pow_alpha / (pow_alpha + 1.0)) as f32,
-            beta_t: 0.5,
-            gamma_t: pow_gamma as f32,
+            iteration: current_iteration + 1,
         }
     }
 }
 
-/// Performs Discounted CFR algorithm until the given number of iterations or exploitability is
-/// satisfied.
+/// Performs CFR+ algorithm until the given number of iterations or exploitability is satisfied.
 ///
+/// CFR+ uses regret matching+ (flooring negative regrets to zero) and linear strategy averaging.
 /// This method returns the exploitability of the obtained strategy.
 pub fn solve<T: Game>(
     game: &mut T,
@@ -79,7 +70,7 @@ pub fn solve<T: Game>(
             break;
         }
 
-        let params = DiscountParams::new(t);
+        let params = CfrPlusParams::new(t);
 
         // alternating updates
         for player in 0..2 {
@@ -120,7 +111,7 @@ pub fn solve<T: Game>(
     exploitability
 }
 
-/// Proceeds Discounted CFR algorithm for one iteration.
+/// Proceeds CFR+ algorithm for one iteration.
 #[inline]
 pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
     if game.is_solved() {
@@ -132,7 +123,7 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration);
+    let params = CfrPlusParams::new(current_iteration);
 
     // alternating updates
     for player in 0..2 {
@@ -155,7 +146,7 @@ fn solve_recursive<T: Game>(
     node: &mut T::Node,
     player: usize,
     cfreach: &[f32],
-    params: &DiscountParams,
+    params: &CfrPlusParams,
 ) {
     // return the counterfactual values when the `node` is terminal
     if node.is_terminal() {
@@ -269,13 +260,15 @@ fn solve_recursive<T: Game>(
         let result = fma_slices_uninit(result, &strategy, &cfv_actions);
 
         if game.is_compression_enabled() {
-            // update the cumulative strategy
+            // update the cumulative strategy (CFR+ linear averaging)
+            let t = params.iteration as f32;
             let scale = node.strategy_scale();
-            let decoder = params.gamma_t * scale / u16::MAX as f32;
+            let decoder = scale / u16::MAX as f32;
             let cum_strategy = node.strategy_compressed_mut();
 
+            // Decode existing cumulative, add weighted current strategy
             strategy.iter_mut().zip(&*cum_strategy).for_each(|(x, y)| {
-                *x += (*y as f32) * decoder;
+                *x = t * *x + (*y as f32) * decoder; // t * current + existing
             });
 
             if !locking.is_empty() {
@@ -289,18 +282,19 @@ fn solve_recursive<T: Game>(
             let new_scale = encode_unsigned_slice(cum_strategy, &strategy);
             node.set_strategy_scale(new_scale);
 
-            // update the cumulative regret
+            // update the cumulative regret (CFR+ regret matching+)
             let scale = node.regret_scale();
-            let alpha_decoder = params.alpha_t * scale / i16::MAX as f32;
-            let beta_decoder = params.beta_t * scale / i16::MAX as f32;
+            let decoder = scale / i16::MAX as f32;
             let cum_regret = node.regrets_compressed_mut();
 
-            cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
-                *x += *y as f32 * if *y >= 0 { alpha_decoder } else { beta_decoder };
-            });
-
+            // First compute instant regret = cfv_action - node_value
             cfv_actions.chunks_exact_mut(num_hands).for_each(|row| {
                 sub_slice(row, result);
+            });
+
+            // Decode cumulative regret, add instant, floor to 0
+            cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
+                *x = ((*y as f32) * decoder + *x).max(0.0); // max(0, cum + instant)
             });
 
             if !locking.is_empty() {
@@ -314,22 +308,22 @@ fn solve_recursive<T: Game>(
             let new_scale = encode_signed_slice(cum_regret, &cfv_actions);
             node.set_regret_scale(new_scale);
         } else {
-            // update the cumulative strategy
-            let gamma = params.gamma_t;
+            // update the cumulative strategy (CFR+ linear averaging)
+            let t = params.iteration as f32;
             let cum_strategy = node.strategy_mut();
             cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
-                *x = *x * gamma + *y;
+                *x += t * *y; // cumulative += weight * current_strategy
             });
 
-            // update the cumulative regret
-            let (alpha, beta) = (params.alpha_t, params.beta_t);
+            // update the cumulative regret (CFR+ regret matching+)
+            // First compute instant regret = cfv_action - node_value
+            cfv_actions.chunks_exact_mut(num_hands).for_each(|row| {
+                sub_slice(row, result);
+            });
+            // Then update cumulative regret with floor at 0
             let cum_regret = node.regrets_mut();
             cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y)| {
-                let coef = if x.is_sign_positive() { alpha } else { beta };
-                *x = *x * coef + *y;
-            });
-            cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
-                sub_slice(row, result);
+                *x = (*x + *y).max(0.0); // new_regret = max(0, cum + instant)
             });
         }
     }

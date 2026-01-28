@@ -7,9 +7,8 @@
 //! [examples]: https://github.com/b-inary/postflop-solver/tree/main/examples
 //!
 //! # Implementation details
-//! - **Algorithm**: The solver uses the state-of-the-art [Discounted CFR] algorithm.
-//!   Currently, the value of γ is set to 3.0 instead of the 2.0 recommended in the original paper.
-//!   Also, the solver resets the cumulative strategy when the number of iterations is a power of 4.
+//! - **Algorithm**: The solver uses the [CFR+] algorithm with regret matching+
+//!   (flooring negative regrets to zero) and linear strategy averaging (weighting by iteration number).
 //! - **Performance**: The solver engine is highly optimized for performance with maintainable code.
 //!   The engine supports multithreading by default, and it takes full advantage of unsafe Rust in hot spots.
 //!   The developer reviews the assembly output from the compiler and ensures that SIMD instructions are used as much as possible.
@@ -29,7 +28,7 @@
 //!   Note, however, that enabling the bunching effect increases the time complexity
 //!   of the evaluation at the terminal nodes and slows down the computation significantly.
 //!
-//! [Discounted CFR]: https://arxiv.org/abs/1809.04040
+//! [CFR+]: https://arxiv.org/abs/1407.5042
 //!
 //! # Crate features
 //! - `bincode`: Uses [bincode] crate (2.0.0-rc.3) to serialize and deserialize the `PostFlopGame` struct.
