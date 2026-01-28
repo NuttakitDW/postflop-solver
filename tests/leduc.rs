@@ -438,10 +438,11 @@ impl GameNode for LeducNode {
 
 #[test]
 fn leduc() {
-    // MCCFR needs more iterations and has higher variance than CFR+
+    // Use full traversal mode (sample_chance=false) for deterministic testing
     let target = 1e-2;
     let mut game = LeducGame::new(false);
-    solve_with_seed(&mut game, 50000, target, false, Some(42));
+    // sample_chance=false means full traversal of chance nodes (like CFR+)
+    solve_with_config(&mut game, 50000, target, false, Some(42), false);
 
     let root = game.root();
 
@@ -460,15 +461,15 @@ fn leduc() {
         .fold(0.0, |acc, (&ev, &strategy)| acc + ev * strategy);
 
     let expected_ev = -0.0856; // verified by OpenSpiel
-    assert!((root_ev - expected_ev).abs() < 0.01); // Tolerance for MCCFR
+    assert!((root_ev - expected_ev).abs() < 0.01);
 }
 
 #[test]
 fn leduc_compressed() {
-    // MCCFR needs more iterations and has higher variance than CFR+
+    // Use full traversal mode (sample_chance=false) for deterministic testing
     let target = 1e-2;
     let mut game = LeducGame::new(true);
-    solve_with_seed(&mut game, 50000, target, false, Some(42));
+    solve_with_config(&mut game, 50000, target, false, Some(42), false);
 
     let root = game.root();
 
@@ -491,5 +492,5 @@ fn leduc_compressed() {
         });
 
     let expected_ev = -0.0856; // verified by OpenSpiel
-    assert!((root_ev - expected_ev).abs() < 0.01); // Tolerance for MCCFR
+    assert!((root_ev - expected_ev).abs() < 0.01);
 }

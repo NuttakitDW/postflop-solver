@@ -104,10 +104,15 @@ struct SolverSettings {
     /// Random seed (optional, for reproducibility)
     #[serde(default)]
     seed: Option<u64>,
+    /// Sample chance nodes for faster iterations (default: true)
+    /// Set to false to use full traversal with isomorphism (slower but lower variance)
+    #[serde(default = "default_sample_chance")]
+    sample_chance: bool,
 }
 
 fn default_max_iterations() -> u32 { 1000 }
 fn default_target_exploitability() -> f32 { 0.5 }
+fn default_sample_chance() -> bool { true }
 
 /// Output settings
 #[derive(Debug, Serialize, Deserialize)]
@@ -194,6 +199,7 @@ fn generate_template() -> SolverConfig {
             target_exploitability_percent: 0.5,
             use_compression: false,
             seed: None,
+            sample_chance: true,
         },
         output: OutputSettings {
             filename: "solution.flop".to_string(),
@@ -438,12 +444,13 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 
     // Solve using MCCFR (External Sampling Monte Carlo CFR)
     let solve_start = Instant::now();
-    let exploitability = solve_with_seed(
+    let exploitability = solve_with_config(
         &mut game,
         config.solver.max_iterations,
         target_exploitability,
         true, // Print progress
         config.solver.seed,
+        config.solver.sample_chance,
     );
     let solve_time = solve_start.elapsed();
 

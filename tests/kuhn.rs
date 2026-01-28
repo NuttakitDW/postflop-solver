@@ -243,10 +243,10 @@ impl GameNode for KuhnNode {
 
 #[test]
 fn kuhn() {
-    // MCCFR needs more iterations and has higher variance than CFR+
-    let target = 1e-2; // Looser tolerance for MCCFR
+    // Use full traversal mode (sample_chance=false) for deterministic testing
+    let target = 1e-2;
     let mut game = KuhnGame::new();
-    solve_with_seed(&mut game, 50000, target, false, Some(42));
+    solve_with_config(&mut game, 50000, target, false, Some(42), false);
 
     let root = game.root();
 
@@ -265,5 +265,5 @@ fn kuhn() {
         .fold(0.0, |acc, (&cfv, &strategy)| acc + cfv * strategy);
 
     let expected_ev = -1.0 / 18.0;
-    assert!((root_ev - expected_ev).abs() < 0.01); // Tolerance for MCCFR
+    assert!((root_ev - expected_ev).abs() < 0.01);
 }

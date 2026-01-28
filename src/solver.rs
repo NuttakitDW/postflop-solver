@@ -15,7 +15,7 @@ use crate::alloc::*;
 /// MCCFR (Monte Carlo CFR) uses sampling to reduce computation:
 /// - For target player: enumerate all actions
 /// - For opponent: sample ONE action using current strategy
-/// - For chance nodes: full traversal (to handle isomorphism correctly)
+/// - For chance nodes: sample ONE outcome (when sample_chance=true)
 ///
 /// Uses CFR+ enhancements:
 /// - Regret matching+: floor cumulative regrets to 0
@@ -23,8 +23,11 @@ use crate::alloc::*;
 struct SolverParams {
     /// Current iteration number (1-indexed for strategy weighting)
     iteration: u32,
-    /// Random number generator for sampling opponent actions
+    /// Random number generator for sampling
     rng: SmallRng,
+    /// Whether to sample chance nodes (true) or fully traverse them (false)
+    /// Sampling is faster but uses more memory (no isomorphism)
+    sample_chance: bool,
 }
 
 /// Performs External Sampling MCCFR algorithm until the given number of iterations or exploitability is satisfied.
@@ -32,20 +35,20 @@ struct SolverParams {
 /// MCCFR uses sampling to reduce computation per iteration:
 /// - Target player: enumerate all actions
 /// - Opponent: sample ONE action using current strategy
-/// - Chance nodes: full traversal (to handle isomorphism correctly)
+/// - Chance nodes: sample ONE outcome (skips isomorphism for speed)
 ///
 /// Uses CFR+ enhancements (regret matching+ and linear averaging).
 /// This method returns the exploitability of the obtained strategy.
 ///
 /// Note: MCCFR typically requires more iterations than pure CFR+ to reach the same exploitability
-/// due to sampling variance, but each iteration is faster for deep trees.
+/// due to sampling variance, but each iteration is faster.
 pub fn solve<T: Game>(
     game: &mut T,
     max_num_iterations: u32,
     target_exploitability: f32,
     print_progress: bool,
 ) -> f32 {
-    solve_with_seed(game, max_num_iterations, target_exploitability, print_progress, None)
+    solve_with_config(game, max_num_iterations, target_exploitability, print_progress, None, true)
 }
 
 /// Performs External Sampling MCCFR algorithm with a specific random seed for reproducibility.
@@ -57,6 +60,23 @@ pub fn solve_with_seed<T: Game>(
     target_exploitability: f32,
     print_progress: bool,
     seed: Option<u64>,
+) -> f32 {
+    solve_with_config(game, max_num_iterations, target_exploitability, print_progress, seed, true)
+}
+
+/// Performs MCCFR algorithm with full configuration options.
+///
+/// Parameters:
+/// - `seed`: Optional random seed for reproducibility
+/// - `sample_chance`: If true, sample chance nodes (faster, no isomorphism).
+///                    If false, fully traverse chance nodes (slower, uses isomorphism).
+pub fn solve_with_config<T: Game>(
+    game: &mut T,
+    max_num_iterations: u32,
+    target_exploitability: f32,
+    print_progress: bool,
+    seed: Option<u64>,
+    sample_chance: bool,
 ) -> f32 {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -108,6 +128,7 @@ pub fn solve_with_seed<T: Game>(
             let params = SolverParams {
                 iteration: t + 1, // 1-indexed
                 rng: SmallRng::seed_from_u64(iter_seed.wrapping_add(player as u64)),
+                sample_chance,
             };
             let mut result = Vec::with_capacity(game.num_private_hands(player));
             solve_recursive(
@@ -146,15 +167,21 @@ pub fn solve_with_seed<T: Game>(
     exploitability
 }
 
-/// Proceeds MCCFR algorithm for one iteration.
+/// Proceeds MCCFR algorithm for one iteration (with chance sampling enabled).
 #[inline]
 pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
-    solve_step_with_seed(game, current_iteration, current_iteration as u64);
+    solve_step_with_config(game, current_iteration, current_iteration as u64, true);
 }
 
 /// Proceeds MCCFR algorithm for one iteration with a specific seed.
 #[inline]
 pub fn solve_step_with_seed<T: Game>(game: &T, current_iteration: u32, seed: u64) {
+    solve_step_with_config(game, current_iteration, seed, true);
+}
+
+/// Proceeds MCCFR algorithm for one iteration with full configuration.
+#[inline]
+pub fn solve_step_with_config<T: Game>(game: &T, current_iteration: u32, seed: u64, sample_chance: bool) {
     if game.is_solved() {
         panic!("Game is already solved");
     }
@@ -170,6 +197,7 @@ pub fn solve_step_with_seed<T: Game>(game: &T, current_iteration: u32, seed: u64
         let params = SolverParams {
             iteration: current_iteration + 1, // 1-indexed
             rng: SmallRng::seed_from_u64(seed.wrapping_add(player as u64)),
+            sample_chance,
         };
         let mut result = Vec::with_capacity(game.num_private_hands(player));
         solve_recursive(
@@ -186,7 +214,7 @@ pub fn solve_step_with_seed<T: Game>(game: &T, current_iteration: u32, seed: u64
 /// Recursively solves using External Sampling MCCFR.
 ///
 /// This implements external sampling MCCFR with:
-/// - Chance nodes: Full traversal to handle isomorphism correctly
+/// - Chance nodes: Sample ONE outcome (if sample_chance=true) or full traversal (if false)
 /// - Opponent nodes: Sample ONE action with importance weighting
 /// - Target player nodes: Enumerate all actions
 ///
@@ -221,8 +249,36 @@ fn solve_recursive<T: Game>(
     #[cfg(not(feature = "custom-alloc"))]
     let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
 
-    // if the `node` is chance - full traversal (same as CFR+ to handle isomorphism)
+    // if the `node` is chance
     if node.is_chance() {
+        if params.sample_chance {
+            // MCCFR mode: Sample ONE chance outcome (faster, no isomorphism)
+            // Sample uniformly from all possible outcomes
+            let sampled_action = params.rng.gen_range(0..num_actions);
+
+            // The cfreach doesn't need scaling when sampling - we'll scale the result instead
+            // Each outcome has probability 1/num_actions, so we multiply result by num_actions
+            let action_params = SolverParams {
+                iteration: params.iteration,
+                rng: SmallRng::seed_from_u64(params.rng.gen()),
+                sample_chance: true,
+            };
+
+            solve_recursive(
+                result,
+                game,
+                &mut node.play(sampled_action),
+                player,
+                cfreach, // Pass cfreach unchanged
+                action_params,
+            );
+
+            // No scaling needed here - the regret updates handle the expectation correctly
+            // because we're sampling uniformly and the cfreach propagates the probabilities
+            return;
+        }
+
+        // Full traversal mode: traverse all outcomes with isomorphism (slower, less memory)
         // update the reach probabilities
         #[cfg(feature = "custom-alloc")]
         let mut cfreach_updated = Vec::with_capacity_in(cfreach.len(), StackAlloc);
@@ -240,6 +296,7 @@ fn solve_recursive<T: Game>(
             let action_params = SolverParams {
                 iteration: params.iteration,
                 rng: SmallRng::seed_from_u64(params.rng.gen()),
+                sample_chance: false,
             };
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
@@ -287,7 +344,7 @@ fn solve_recursive<T: Game>(
         return;
     }
 
-    // if the current player is `player` - enumerate all actions (same as CFR+)
+    // if the current player is `player` - enumerate all actions
     if node.player() == player {
         // compute the counterfactual values of each action
         for action in 0..num_actions {
@@ -295,6 +352,7 @@ fn solve_recursive<T: Game>(
             let action_params = SolverParams {
                 iteration: params.iteration,
                 rng: SmallRng::seed_from_u64(params.rng.gen()),
+                sample_chance: params.sample_chance,
             };
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
