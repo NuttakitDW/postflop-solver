@@ -430,6 +430,17 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let oop_hands = game.private_cards(0).len();
     let ip_hands = game.private_cards(1).len();
 
+    // Set card info for pixel art mode (Mario!)
+    let oop_cards: Vec<(u8, u8)> = game.private_cards(0)
+        .iter()
+        .map(|&(c1, c2)| (c1, c2))
+        .collect();
+    let ip_cards: Vec<(u8, u8)> = game.private_cards(1)
+        .iter()
+        .map(|&(c1, c2)| (c1, c2))
+        .collect();
+    set_card_info_both(oop_cards, ip_cards);
+
     let (mem_uncompressed, _) = game.memory_usage();
     let memory_mb = mem_uncompressed as f64 / 1024.0 / 1024.0;
 

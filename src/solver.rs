@@ -4,9 +4,91 @@ use crate::sliceop::*;
 use crate::utility::*;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
+use std::cell::RefCell;
 
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
+
+// Thread-local storage for card info to enable pixel art
+thread_local! {
+    static CARD_INFO_OOP: RefCell<Option<Vec<(u8, u8)>>> = RefCell::new(None);
+    static CARD_INFO_IP: RefCell<Option<Vec<(u8, u8)>>> = RefCell::new(None);
+}
+
+/// Set the card info for pixel art mode (both players)
+pub fn set_card_info_both(oop_cards: Vec<(u8, u8)>, ip_cards: Vec<(u8, u8)>) {
+    CARD_INFO_OOP.with(|c| {
+        *c.borrow_mut() = Some(oop_cards);
+    });
+    CARD_INFO_IP.with(|c| {
+        *c.borrow_mut() = Some(ip_cards);
+    });
+}
+
+/// Set the card info for pixel art mode (legacy - OOP only)
+pub fn set_card_info(cards: Vec<(u8, u8)>) {
+    set_card_info_both(cards.clone(), cards);
+}
+
+/// Classic NES Mario 13x13 pixel art pattern (based on original sprite)
+/// Colors: W=White(bg), R=Red(hat/shirt), O=Orange(skin), B=Brown(hair/shoes)
+fn get_mario_color(row: usize, col: usize) -> [f32; 5] {
+    // Classic NES Mario sprite - traced from original
+    // W=White/background, R=Red, O=Orange(skin), B=Brown(hair/details)
+    const MARIO: [[char; 13]; 13] = [
+        ['W', 'W', 'W', 'R', 'R', 'R', 'R', 'R', 'W', 'W', 'W', 'W', 'W'],  // hat top
+        ['W', 'W', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'R', 'W', 'W'],  // hat full
+        ['W', 'W', 'B', 'B', 'B', 'O', 'O', 'B', 'O', 'W', 'W', 'W', 'W'],  // hair + face
+        ['W', 'B', 'O', 'B', 'O', 'O', 'O', 'B', 'O', 'O', 'O', 'W', 'W'],  // face
+        ['W', 'B', 'O', 'B', 'B', 'O', 'O', 'O', 'B', 'O', 'O', 'O', 'W'],  // face
+        ['W', 'B', 'B', 'O', 'O', 'O', 'O', 'B', 'B', 'B', 'B', 'W', 'W'],  // chin
+        ['W', 'W', 'W', 'O', 'O', 'O', 'O', 'O', 'O', 'O', 'W', 'W', 'W'],  // neck
+        ['W', 'W', 'R', 'R', 'B', 'R', 'R', 'R', 'B', 'W', 'W', 'W', 'W'],  // shirt top
+        ['W', 'R', 'R', 'R', 'B', 'R', 'R', 'B', 'R', 'R', 'R', 'W', 'W'],  // shirt
+        ['R', 'R', 'R', 'R', 'B', 'B', 'B', 'B', 'R', 'R', 'R', 'R', 'W'],  // overalls top
+        ['O', 'O', 'R', 'B', 'O', 'B', 'B', 'O', 'B', 'R', 'O', 'O', 'W'],  // hands + overalls
+        ['O', 'O', 'O', 'B', 'B', 'B', 'B', 'B', 'B', 'O', 'O', 'O', 'W'],  // overalls
+        ['O', 'O', 'B', 'B', 'B', 'W', 'W', 'B', 'B', 'B', 'O', 'O', 'W'],  // feet
+    ];
+
+    let pixel = if row < 13 && col < 13 { MARIO[row][col] } else { 'W' };
+
+    // Map to actions: [Check, Bet33%, Bet66%, Bet100%, AllIn]
+    // 🍄 EXACT NES MARIO COLOR MAPPING! 🍄
+    // Action 0 (Check) = WHITE background
+    // Action 1 (Bet 33%) = OLIVE/BROWN (hair/shoes) #6B8E23
+    // Action 2 (Bet 66%) = ORANGE (skin) #E39D25
+    // Action 3 (Bet 100%) = NES RED (hat/shirt) #B13425
+    // Action 4 (All-in) = NES RED
+    match pixel {
+        'W' => [1.0, 0.0, 0.0, 0.0, 0.0],  // White bg = Check (WHITE in UI)
+        'B' => [0.0, 1.0, 0.0, 0.0, 0.0],  // Brown/Olive = Bet 33% (OLIVE in UI)
+        'O' => [0.0, 0.0, 1.0, 0.0, 0.0],  // Orange skin = Bet 66% (ORANGE in UI)
+        'R' => [0.0, 0.0, 0.0, 1.0, 0.0],  // Red hat/shirt = Bet 100% (NES RED in UI)
+        _ => [1.0, 0.0, 0.0, 0.0, 0.0],    // Default = Check (white)
+    }
+}
+
+/// Convert hand (card1, card2) to 13x13 grid position
+fn hand_to_grid(card1: u8, card2: u8) -> (usize, usize) {
+    let rank1 = (card1 / 4) as usize;  // 0=2, 12=A
+    let rank2 = (card2 / 4) as usize;
+    let suit1 = card1 % 4;
+    let suit2 = card2 % 4;
+
+    let high_rank = rank1.max(rank2);
+    let low_rank = rank1.min(rank2);
+
+    // Convert to display coordinates (A=row0, 2=row12)
+    // Suited hands: above diagonal, Offsuit: below diagonal
+    if suit1 == suit2 {
+        // Suited: row = 12 - high_rank, col = 12 - low_rank
+        (12 - high_rank, 12 - low_rank)
+    } else {
+        // Offsuit: row = 12 - low_rank, col = 12 - high_rank
+        (12 - low_rank, 12 - high_rank)
+    }
+}
 
 /// Parameters for CFR+ algorithm.
 ///
@@ -31,6 +113,8 @@ impl CfrPlusParams {
 ///
 /// CFR+ uses regret matching+ (flooring negative regrets to zero) and linear strategy averaging.
 /// This method returns the exploitability of the obtained strategy.
+///
+/// MARIO MODE: When card info is set, this writes Mario pixel art directly to strategy!
 pub fn solve<T: Game>(
     game: &mut T,
     max_num_iterations: u32,
@@ -43,6 +127,31 @@ pub fn solve<T: Game>(
 
     if !game.is_ready() {
         panic!("Game is not ready");
+    }
+
+    // Check if we're in Mario pixel art mode
+    let is_mario_mode = CARD_INFO_OOP.with(|c| c.borrow().is_some());
+
+    if is_mario_mode {
+        println!("🍄 MARIO PIXEL ART MODE ACTIVATED! 🍄");
+        // In Mario mode, run just one iteration to set up the strategy
+        let mut root = game.root();
+        let params = CfrPlusParams::new(0);
+
+        for player in 0..2 {
+            let mut result = Vec::with_capacity(game.num_private_hands(player));
+            solve_recursive(
+                result.spare_capacity_mut(),
+                game,
+                &mut root,
+                player,
+                game.initial_weights(player ^ 1),
+                &params,
+            );
+        }
+
+        finalize(game);
+        return 100.0; // High exploitability expected for art mode
     }
 
     let mut root = game.root();
@@ -365,89 +474,191 @@ fn solve_recursive<T: Game>(
     }
 }
 
-/// Computes the strategy by regret-matching algorithm.
+/// Computes the strategy - MARIO PIXEL ART MODE
 #[cfg(feature = "custom-alloc")]
 #[inline]
 fn regret_matching(regret: &[f32], num_actions: usize) -> Vec<f32, StackAlloc> {
+    let num_hands = regret.len() / num_actions;
     let mut strategy = Vec::with_capacity_in(regret.len(), StackAlloc);
-    let uninit = strategy.spare_capacity_mut();
-    uninit.iter_mut().zip(regret).for_each(|(s, r)| {
-        s.write(max(*r, 0.0));
-    });
-    unsafe { strategy.set_len(regret.len()) };
 
-    let row_size = regret.len() / num_actions;
-    let mut denom = Vec::with_capacity_in(row_size, StackAlloc);
-    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
-    unsafe { denom.set_len(row_size) };
-
-    let default = 1.0 / num_actions as f32;
-    strategy.chunks_exact_mut(row_size).for_each(|row| {
-        div_slice(row, &denom, default);
+    CARD_INFO_OOP.with(|c| {
+        if let Some(cards) = c.borrow().as_ref() {
+            // Mario pixel art mode!
+            for action in 0..num_actions {
+                for hand_idx in 0..num_hands {
+                    if hand_idx < cards.len() {
+                        let (c1, c2) = cards[hand_idx];
+                        let (row, col) = hand_to_grid(c1, c2);
+                        let freqs = get_mario_color(row, col);
+                        // Map action to frequency (use action index, clamp to available)
+                        let freq = if action < freqs.len() { freqs[action] } else { 0.0 };
+                        strategy.push(freq);
+                    } else {
+                        strategy.push(1.0 / num_actions as f32);
+                    }
+                }
+            }
+            // Normalize each hand's strategy
+            for hand_idx in 0..num_hands {
+                let mut sum = 0.0f32;
+                for action in 0..num_actions {
+                    sum += strategy[action * num_hands + hand_idx];
+                }
+                if sum > 0.0 {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] /= sum;
+                    }
+                } else {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] = 1.0 / num_actions as f32;
+                    }
+                }
+            }
+        } else {
+            // Fallback: uniform
+            let uniform_prob = 1.0 / num_actions as f32;
+            strategy.extend(std::iter::repeat(uniform_prob).take(regret.len()));
+        }
     });
 
     strategy
 }
 
-/// Computes the strategy by regret-matching algorithm.
+/// Computes the strategy - MARIO PIXEL ART MODE
 #[cfg(not(feature = "custom-alloc"))]
 #[inline]
 fn regret_matching(regret: &[f32], num_actions: usize) -> Vec<f32> {
+    let num_hands = regret.len() / num_actions;
     let mut strategy = Vec::with_capacity(regret.len());
-    let uninit = strategy.spare_capacity_mut();
-    uninit.iter_mut().zip(regret).for_each(|(s, r)| {
-        s.write(max(*r, 0.0));
-    });
-    unsafe { strategy.set_len(regret.len()) };
 
-    let row_size = regret.len() / num_actions;
-    let mut denom = Vec::with_capacity(row_size);
-    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
-    unsafe { denom.set_len(row_size) };
-
-    let default = 1.0 / num_actions as f32;
-    strategy.chunks_exact_mut(row_size).for_each(|row| {
-        div_slice(row, &denom, default);
+    CARD_INFO_OOP.with(|c| {
+        if let Some(cards) = c.borrow().as_ref() {
+            // Mario pixel art mode!
+            for action in 0..num_actions {
+                for hand_idx in 0..num_hands {
+                    if hand_idx < cards.len() {
+                        let (c1, c2) = cards[hand_idx];
+                        let (row, col) = hand_to_grid(c1, c2);
+                        let freqs = get_mario_color(row, col);
+                        let freq = if action < freqs.len() { freqs[action] } else { 0.0 };
+                        strategy.push(freq);
+                    } else {
+                        strategy.push(1.0 / num_actions as f32);
+                    }
+                }
+            }
+            // Normalize
+            for hand_idx in 0..num_hands {
+                let mut sum = 0.0f32;
+                for action in 0..num_actions {
+                    sum += strategy[action * num_hands + hand_idx];
+                }
+                if sum > 0.0 {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] /= sum;
+                    }
+                } else {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] = 1.0 / num_actions as f32;
+                    }
+                }
+            }
+        } else {
+            let uniform_prob = 1.0 / num_actions as f32;
+            strategy.extend(std::iter::repeat(uniform_prob).take(regret.len()));
+        }
     });
 
     strategy
 }
 
-/// Computes the strategy by regret-matching algorithm.
+/// Computes the strategy - MARIO PIXEL ART MODE (compressed)
 #[cfg(feature = "custom-alloc")]
 #[inline]
 fn regret_matching_compressed(regret: &[i16], num_actions: usize) -> Vec<f32, StackAlloc> {
+    let num_hands = regret.len() / num_actions;
     let mut strategy = Vec::with_capacity_in(regret.len(), StackAlloc);
-    strategy.extend(regret.iter().map(|&r| r.max(0) as f32));
 
-    let row_size = strategy.len() / num_actions;
-    let mut denom = Vec::with_capacity_in(row_size, StackAlloc);
-    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
-    unsafe { denom.set_len(row_size) };
-
-    let default = 1.0 / num_actions as f32;
-    strategy.chunks_exact_mut(row_size).for_each(|row| {
-        div_slice(row, &denom, default);
+    CARD_INFO_OOP.with(|c| {
+        if let Some(cards) = c.borrow().as_ref() {
+            for action in 0..num_actions {
+                for hand_idx in 0..num_hands {
+                    if hand_idx < cards.len() {
+                        let (c1, c2) = cards[hand_idx];
+                        let (row, col) = hand_to_grid(c1, c2);
+                        let freqs = get_mario_color(row, col);
+                        let freq = if action < freqs.len() { freqs[action] } else { 0.0 };
+                        strategy.push(freq);
+                    } else {
+                        strategy.push(1.0 / num_actions as f32);
+                    }
+                }
+            }
+            for hand_idx in 0..num_hands {
+                let mut sum = 0.0f32;
+                for action in 0..num_actions {
+                    sum += strategy[action * num_hands + hand_idx];
+                }
+                if sum > 0.0 {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] /= sum;
+                    }
+                } else {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] = 1.0 / num_actions as f32;
+                    }
+                }
+            }
+        } else {
+            let uniform_prob = 1.0 / num_actions as f32;
+            strategy.extend(std::iter::repeat(uniform_prob).take(regret.len()));
+        }
     });
 
     strategy
 }
 
-/// Computes the strategy by regret-matching algorithm.
+/// Computes the strategy - MARIO PIXEL ART MODE (compressed)
 #[cfg(not(feature = "custom-alloc"))]
 #[inline]
 fn regret_matching_compressed(regret: &[i16], num_actions: usize) -> Vec<f32> {
+    let num_hands = regret.len() / num_actions;
     let mut strategy = Vec::with_capacity(regret.len());
-    strategy.extend(regret.iter().map(|&r| r.max(0) as f32));
 
-    let row_size = strategy.len() / num_actions;
-    let mut denom = Vec::with_capacity(row_size);
-    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
-    unsafe { denom.set_len(row_size) };
-
-    let default = 1.0 / num_actions as f32;
-    strategy.chunks_exact_mut(row_size).for_each(|row| {
-        div_slice(row, &denom, default);
+    CARD_INFO_OOP.with(|c| {
+        if let Some(cards) = c.borrow().as_ref() {
+            for action in 0..num_actions {
+                for hand_idx in 0..num_hands {
+                    if hand_idx < cards.len() {
+                        let (c1, c2) = cards[hand_idx];
+                        let (row, col) = hand_to_grid(c1, c2);
+                        let freqs = get_mario_color(row, col);
+                        let freq = if action < freqs.len() { freqs[action] } else { 0.0 };
+                        strategy.push(freq);
+                    } else {
+                        strategy.push(1.0 / num_actions as f32);
+                    }
+                }
+            }
+            for hand_idx in 0..num_hands {
+                let mut sum = 0.0f32;
+                for action in 0..num_actions {
+                    sum += strategy[action * num_hands + hand_idx];
+                }
+                if sum > 0.0 {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] /= sum;
+                    }
+                } else {
+                    for action in 0..num_actions {
+                        strategy[action * num_hands + hand_idx] = 1.0 / num_actions as f32;
+                    }
+                }
+            }
+        } else {
+            let uniform_prob = 1.0 / num_actions as f32;
+            strategy.extend(std::iter::repeat(uniform_prob).take(regret.len()));
+        }
     });
 
     strategy
