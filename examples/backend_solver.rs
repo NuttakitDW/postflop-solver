@@ -364,30 +364,22 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         Err(e) => return create_error_result(format!("Failed to parse IP river bet sizes: {}", e)),
     };
 
-    // Parse donk sizes if enabled
-    let turn_donk_sizes = if config.tree.donk_option == 1 || config.tree.donk_option == 3 {
-        if !config.bet_sizes.oop_turn_donk.is_empty() {
-            let oop_turn_donk = normalize_bet_sizes(&config.bet_sizes.oop_turn_donk);
-            match DonkSizeOptions::try_from(oop_turn_donk.as_str()) {
-                Ok(d) => Some(d),
-                Err(e) => return create_error_result(format!("Failed to parse turn donk sizes: {}", e)),
-            }
-        } else {
-            None
+    // Parse donk sizes - auto-detect from bet size strings (no need for donkOption!)
+    let turn_donk_sizes = if !config.bet_sizes.oop_turn_donk.is_empty() {
+        let oop_turn_donk = normalize_bet_sizes(&config.bet_sizes.oop_turn_donk);
+        match DonkSizeOptions::try_from(oop_turn_donk.as_str()) {
+            Ok(d) => Some(d),
+            Err(e) => return create_error_result(format!("Failed to parse turn donk sizes: {}", e)),
         }
     } else {
         None
     };
 
-    let river_donk_sizes = if config.tree.donk_option == 2 || config.tree.donk_option == 3 {
-        if !config.bet_sizes.oop_river_donk.is_empty() {
-            let oop_river_donk = normalize_bet_sizes(&config.bet_sizes.oop_river_donk);
-            match DonkSizeOptions::try_from(oop_river_donk.as_str()) {
-                Ok(d) => Some(d),
-                Err(e) => return create_error_result(format!("Failed to parse river donk sizes: {}", e)),
-            }
-        } else {
-            None
+    let river_donk_sizes = if !config.bet_sizes.oop_river_donk.is_empty() {
+        let oop_river_donk = normalize_bet_sizes(&config.bet_sizes.oop_river_donk);
+        match DonkSizeOptions::try_from(oop_river_donk.as_str()) {
+            Ok(d) => Some(d),
+            Err(e) => return create_error_result(format!("Failed to parse river donk sizes: {}", e)),
         }
     } else {
         None
