@@ -2,40 +2,61 @@ use crate::interface::*;
 use crate::mutex_like::*;
 use crate::sliceop::*;
 use crate::utility::*;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
 
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
 
-/// Parameters for CFR+ algorithm.
+/// Parameters for External Sampling MCCFR algorithm.
 ///
-/// CFR+ uses:
+/// MCCFR (Monte Carlo CFR) uses sampling to reduce computation:
+/// - For target player: enumerate all actions
+/// - For opponent: sample ONE action using current strategy
+/// - For chance nodes: full traversal (to handle isomorphism correctly)
+///
+/// Uses CFR+ enhancements:
 /// - Regret matching+: floor cumulative regrets to 0
 /// - Linear averaging: weight strategy by iteration number
-struct CfrPlusParams {
+struct SolverParams {
     /// Current iteration number (1-indexed for strategy weighting)
     iteration: u32,
+    /// Random number generator for sampling opponent actions
+    rng: SmallRng,
 }
 
-impl CfrPlusParams {
-    pub fn new(current_iteration: u32) -> Self {
-        // iteration is 1-indexed (matching slumbot2019 which starts from iteration 1)
-        Self {
-            iteration: current_iteration + 1,
-        }
-    }
-}
-
-/// Performs CFR+ algorithm until the given number of iterations or exploitability is satisfied.
+/// Performs External Sampling MCCFR algorithm until the given number of iterations or exploitability is satisfied.
 ///
-/// CFR+ uses regret matching+ (flooring negative regrets to zero) and linear strategy averaging.
+/// MCCFR uses sampling to reduce computation per iteration:
+/// - Target player: enumerate all actions
+/// - Opponent: sample ONE action using current strategy
+/// - Chance nodes: full traversal (to handle isomorphism correctly)
+///
+/// Uses CFR+ enhancements (regret matching+ and linear averaging).
 /// This method returns the exploitability of the obtained strategy.
+///
+/// Note: MCCFR typically requires more iterations than pure CFR+ to reach the same exploitability
+/// due to sampling variance, but each iteration is faster for deep trees.
 pub fn solve<T: Game>(
     game: &mut T,
     max_num_iterations: u32,
     target_exploitability: f32,
     print_progress: bool,
+) -> f32 {
+    solve_with_seed(game, max_num_iterations, target_exploitability, print_progress, None)
+}
+
+/// Performs External Sampling MCCFR algorithm with a specific random seed for reproducibility.
+///
+/// Same as `solve()` but allows specifying a seed for deterministic results.
+pub fn solve_with_seed<T: Game>(
+    game: &mut T,
+    max_num_iterations: u32,
+    target_exploitability: f32,
+    print_progress: bool,
+    seed: Option<u64>,
 ) -> f32 {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -54,6 +75,12 @@ pub fn solve<T: Game>(
         0.0
     };
 
+    // Initialize RNG with seed for reproducibility
+    let base_rng = match seed {
+        Some(s) => SmallRng::seed_from_u64(s),
+        None => SmallRng::from_entropy(),
+    };
+
     if print_progress {
         print!("iteration: 0 / {max_num_iterations} ");
         if starting_pot > 0.0 {
@@ -65,15 +92,23 @@ pub fn solve<T: Game>(
         io::stdout().flush().unwrap();
     }
 
+    // Create a master RNG to seed per-iteration RNGs
+    let mut master_rng = base_rng;
+
     for t in 0..max_num_iterations {
         if exploitability <= target_exploitability {
             break;
         }
 
-        let params = CfrPlusParams::new(t);
+        // Create per-iteration RNG (seeded from master for reproducibility)
+        let iter_seed = master_rng.gen::<u64>();
 
-        // alternating updates
+        // alternating updates - each player gets their own RNG for this iteration
         for player in 0..2 {
+            let params = SolverParams {
+                iteration: t + 1, // 1-indexed
+                rng: SmallRng::seed_from_u64(iter_seed.wrapping_add(player as u64)),
+            };
             let mut result = Vec::with_capacity(game.num_private_hands(player));
             solve_recursive(
                 result.spare_capacity_mut(),
@@ -81,7 +116,7 @@ pub fn solve<T: Game>(
                 &mut root,
                 player,
                 game.initial_weights(player ^ 1),
-                &params,
+                params,
             );
         }
 
@@ -111,9 +146,15 @@ pub fn solve<T: Game>(
     exploitability
 }
 
-/// Proceeds CFR+ algorithm for one iteration.
+/// Proceeds MCCFR algorithm for one iteration.
 #[inline]
 pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
+    solve_step_with_seed(game, current_iteration, current_iteration as u64);
+}
+
+/// Proceeds MCCFR algorithm for one iteration with a specific seed.
+#[inline]
+pub fn solve_step_with_seed<T: Game>(game: &T, current_iteration: u32, seed: u64) {
     if game.is_solved() {
         panic!("Game is already solved");
     }
@@ -123,10 +164,13 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
     }
 
     let mut root = game.root();
-    let params = CfrPlusParams::new(current_iteration);
 
     // alternating updates
     for player in 0..2 {
+        let params = SolverParams {
+            iteration: current_iteration + 1, // 1-indexed
+            rng: SmallRng::seed_from_u64(seed.wrapping_add(player as u64)),
+        };
         let mut result = Vec::with_capacity(game.num_private_hands(player));
         solve_recursive(
             result.spare_capacity_mut(),
@@ -134,19 +178,26 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
             &mut root,
             player,
             game.initial_weights(player ^ 1),
-            &params,
+            params,
         );
     }
 }
 
-/// Recursively solves the counterfactual values.
+/// Recursively solves using External Sampling MCCFR.
+///
+/// This implements external sampling MCCFR with:
+/// - Chance nodes: Full traversal to handle isomorphism correctly
+/// - Opponent nodes: Sample ONE action with importance weighting
+/// - Target player nodes: Enumerate all actions
+///
+/// Uses CFR+ enhancements (regret matching+ and linear averaging).
 fn solve_recursive<T: Game>(
     result: &mut [MaybeUninit<f32>],
     game: &T,
     node: &mut T::Node,
     player: usize,
     cfreach: &[f32],
-    params: &CfrPlusParams,
+    mut params: SolverParams,
 ) {
     // return the counterfactual values when the `node` is terminal
     if node.is_terminal() {
@@ -170,7 +221,7 @@ fn solve_recursive<T: Game>(
     #[cfg(not(feature = "custom-alloc"))]
     let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
 
-    // if the `node` is chance
+    // if the `node` is chance - full traversal (same as CFR+ to handle isomorphism)
     if node.is_chance() {
         // update the reach probabilities
         #[cfg(feature = "custom-alloc")]
@@ -184,17 +235,21 @@ fn solve_recursive<T: Game>(
         );
         unsafe { cfreach_updated.set_len(cfreach.len()) };
 
-        // compute the counterfactual values of each action
-        for_each_child(node, |action| {
+        // compute the counterfactual values of each action (full traversal)
+        for action in 0..num_actions {
+            let action_params = SolverParams {
+                iteration: params.iteration,
+                rng: SmallRng::seed_from_u64(params.rng.gen()),
+            };
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 &cfreach_updated,
-                params,
+                action_params,
             );
-        });
+        }
 
         // use 64-bit floating point values
         #[cfg(feature = "custom-alloc")]
@@ -228,22 +283,30 @@ fn solve_recursive<T: Game>(
         result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
             r.write(v as f32);
         });
+
+        return;
     }
-    // if the current player is `player`
-    else if node.player() == player {
+
+    // if the current player is `player` - enumerate all actions (same as CFR+)
+    if node.player() == player {
         // compute the counterfactual values of each action
-        for_each_child(node, |action| {
+        for action in 0..num_actions {
+            // Clone params with a derived RNG for each action to ensure reproducibility
+            let action_params = SolverParams {
+                iteration: params.iteration,
+                rng: SmallRng::seed_from_u64(params.rng.gen()),
+            };
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 cfreach,
-                params,
+                action_params,
             );
-        });
+        }
 
-        // compute the strategy by regret-maching algorithm
+        // compute the strategy by regret-matching algorithm
         let mut strategy = if game.is_compression_enabled() {
             regret_matching_compressed(node.regrets_compressed(), num_actions)
         } else {
@@ -254,7 +317,7 @@ fn solve_recursive<T: Game>(
         let locking = game.locking_strategy(node);
         apply_locking_strategy(&mut strategy, locking);
 
-        // sum up the counterfactual values
+        // sum up the counterfactual values weighted by strategy
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
         let result = fma_slices_uninit(result, &strategy, &cfv_actions);
@@ -268,7 +331,7 @@ fn solve_recursive<T: Game>(
 
             // Decode existing cumulative, add weighted current strategy
             strategy.iter_mut().zip(&*cum_strategy).for_each(|(x, y)| {
-                *x = t * *x + (*y as f32) * decoder; // t * current + existing
+                *x = t * *x + (*y as f32) * decoder;
             });
 
             if !locking.is_empty() {
@@ -294,7 +357,7 @@ fn solve_recursive<T: Game>(
 
             // Decode cumulative regret, add instant, floor to 0
             cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
-                *x = ((*y as f32) * decoder + *x).max(0.0); // max(0, cum + instant)
+                *x = ((*y as f32) * decoder + *x).max(0.0);
             });
 
             if !locking.is_empty() {
@@ -312,7 +375,7 @@ fn solve_recursive<T: Game>(
             let t = params.iteration as f32;
             let cum_strategy = node.strategy_mut();
             cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
-                *x += t * *y; // cumulative += weight * current_strategy
+                *x += t * *y;
             });
 
             // update the cumulative regret (CFR+ regret matching+)
@@ -323,14 +386,14 @@ fn solve_recursive<T: Game>(
             // Then update cumulative regret with floor at 0
             let cum_regret = node.regrets_mut();
             cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y)| {
-                *x = (*x + *y).max(0.0); // new_regret = max(0, cum + instant)
+                *x = (*x + *y).max(0.0);
             });
         }
     }
-    // if the current player is not `player`
+    // if the current player is not `player` - SAMPLE one action (external sampling)
     else {
         // compute the strategy by regret-matching algorithm
-        let mut cfreach_actions = if game.is_compression_enabled() {
+        let mut strategy = if game.is_compression_enabled() {
             regret_matching_compressed(node.regrets_compressed(), num_actions)
         } else {
             regret_matching(node.regrets(), num_actions)
@@ -338,31 +401,76 @@ fn solve_recursive<T: Game>(
 
         // node-locking
         let locking = game.locking_strategy(node);
-        apply_locking_strategy(&mut cfreach_actions, locking);
+        apply_locking_strategy(&mut strategy, locking);
 
-        // update the reach probabilities
         let row_size = cfreach.len();
-        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
-            mul_slice(row, cfreach);
-        });
 
-        // compute the counterfactual values of each action
-        for_each_child(node, |action| {
-            solve_recursive(
-                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
-                game,
-                &mut node.play(action),
-                player,
-                row(&cfreach_actions, action, row_size),
-                params,
-            );
-        });
+        // For external sampling: sample ONE action according to reach-weighted average strategy
+        // Compute average strategy weighted by opponent reach
+        let mut avg_strategy = vec![0.0f32; num_actions];
+        let mut total_reach = 0.0f32;
+        for hand in 0..row_size {
+            let reach = cfreach[hand];
+            if reach > 0.0 {
+                total_reach += reach;
+                for action in 0..num_actions {
+                    avg_strategy[action] += reach * strategy[action * row_size + hand];
+                }
+            }
+        }
+        if total_reach > 0.0 {
+            for action in 0..num_actions {
+                avg_strategy[action] /= total_reach;
+            }
+        } else {
+            // Uniform if no reach
+            for action in 0..num_actions {
+                avg_strategy[action] = 1.0 / num_actions as f32;
+            }
+        }
 
-        // sum up the counterfactual values
-        let mut cfv_actions = cfv_actions.lock();
-        unsafe { cfv_actions.set_len(num_actions * num_hands) };
-        sum_slices_uninit(result, &cfv_actions);
+        // Sample an action according to the average strategy
+        let sampled_action = sample_action_from_probs(&avg_strategy, &mut params.rng);
+        let sampled_prob = avg_strategy[sampled_action].max(1e-6); // Avoid division by zero
+
+        // Compute importance-weighted cfreach for the sampled action
+        // cfreach_weighted[hand] = cfreach[hand] * strategy[sampled_action][hand] / sampled_prob
+        // This is proper importance sampling: we sample with P(a) but need cfreach * strategy[a]
+        #[cfg(feature = "custom-alloc")]
+        let mut cfreach_weighted = Vec::with_capacity_in(row_size, StackAlloc);
+        #[cfg(not(feature = "custom-alloc"))]
+        let mut cfreach_weighted = Vec::with_capacity(row_size);
+
+        let action_strategy = row(&strategy, sampled_action, row_size);
+        for hand in 0..row_size {
+            let weighted_reach = cfreach[hand] * action_strategy[hand] / sampled_prob;
+            cfreach_weighted.push(weighted_reach);
+        }
+
+        solve_recursive(
+            result,
+            game,
+            &mut node.play(sampled_action),
+            player,
+            &cfreach_weighted,
+            params,
+        );
     }
+}
+
+/// Samples an action according to the given probability distribution.
+#[inline]
+fn sample_action_from_probs(probs: &[f32], rng: &mut SmallRng) -> usize {
+    let r: f32 = rng.gen();
+    let mut cumsum = 0.0;
+    for (i, &p) in probs.iter().enumerate() {
+        cumsum += p;
+        if r < cumsum {
+            return i;
+        }
+    }
+    // Return last action if we didn't find one (can happen due to floating point)
+    probs.len() - 1
 }
 
 /// Computes the strategy by regret-matching algorithm.

@@ -243,9 +243,10 @@ impl GameNode for KuhnNode {
 
 #[test]
 fn kuhn() {
-    let target = 1e-4;
+    // MCCFR needs more iterations and has higher variance than CFR+
+    let target = 1e-2; // Looser tolerance for MCCFR
     let mut game = KuhnGame::new();
-    solve(&mut game, 10000, target, false);
+    solve_with_seed(&mut game, 50000, target, false, Some(42));
 
     let root = game.root();
 
@@ -264,5 +265,5 @@ fn kuhn() {
         .fold(0.0, |acc, (&cfv, &strategy)| acc + cfv * strategy);
 
     let expected_ev = -1.0 / 18.0;
-    assert!((root_ev - expected_ev).abs() < 2.0 * target);
+    assert!((root_ev - expected_ev).abs() < 0.01); // Tolerance for MCCFR
 }

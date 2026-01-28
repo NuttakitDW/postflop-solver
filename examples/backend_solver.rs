@@ -101,6 +101,9 @@ struct SolverSettings {
     target_exploitability_percent: f32,
     #[serde(default)]
     use_compression: bool,
+    /// Random seed (optional, for reproducibility)
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 fn default_max_iterations() -> u32 { 1000 }
@@ -190,6 +193,7 @@ fn generate_template() -> SolverConfig {
             max_iterations: 1000,
             target_exploitability_percent: 0.5,
             use_compression: false,
+            seed: None,
         },
         output: OutputSettings {
             filename: "solution.flop".to_string(),
@@ -432,13 +436,14 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let target_exploitability =
         game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
 
-    // Solve
+    // Solve using MCCFR (External Sampling Monte Carlo CFR)
     let solve_start = Instant::now();
-    let exploitability = solve(
+    let exploitability = solve_with_seed(
         &mut game,
         config.solver.max_iterations,
         target_exploitability,
         true, // Print progress
+        config.solver.seed,
     );
     let solve_time = solve_start.elapsed();
 
