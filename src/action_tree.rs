@@ -116,8 +116,8 @@ pub struct TreeConfig {
     /// value (set `0.0` to disable).
     pub add_allin_threshold: f64,
 
-    /// Force all-in action if the SPR (stack/pot) after the opponent's call is below or equal to
-    /// this value (set `0.0` to disable).
+    /// Force all-in action if the bet amount is greater than or equal to this
+    /// percentage of the remaining stack (set `0.0` to disable).
     ///
     /// Personal recommendation: between `0.1` and `0.2`
     pub force_allin_threshold: f64,
@@ -663,10 +663,9 @@ impl ActionTree {
         }
 
         let is_above_threshold = |amount: i32| {
-            let new_amount_diff = amount - prev_amount;
-            let new_pot = pot + 2 * new_amount_diff;
-            let threshold = (new_pot as f64 * self.config.force_allin_threshold).round() as i32;
-            max_amount <= amount + threshold
+            // GTO Wizard style: force all-in if bet >= threshold × stack
+            let threshold_amount = (max_amount as f64 * self.config.force_allin_threshold).round() as i32;
+            amount >= threshold_amount
         };
 
         // clamp bet amounts
