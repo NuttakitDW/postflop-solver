@@ -77,6 +77,7 @@ pub enum BoardState {
 ///     add_allin_threshold: 1.5,
 ///     force_allin_threshold: 0.15,
 ///     merging_threshold: 0.1,
+///     max_raises_per_street: 5, // GTO Wizard default
 /// };
 /// ```
 #[derive(Debug, Clone, Default)]

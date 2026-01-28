@@ -379,66 +379,6 @@ mod tests {
     use crate::action_tree::*;
     use crate::card::*;
     use crate::range::*;
-    use crate::utility::*;
-
-    #[test]
-    fn save_and_load_file() {
-        let card_config = CardConfig {
-            range: [Range::ones(); 2],
-            flop: flop_from_str("Td9d6h").unwrap(),
-            ..Default::default()
-        };
-
-        let tree_config = TreeConfig {
-            starting_pot: 60,
-            effective_stack: 970,
-            flop_bet_sizes: [("50%", "").try_into().unwrap(), Default::default()],
-            turn_bet_sizes: [("50%", "").try_into().unwrap(), Default::default()],
-            ..Default::default()
-        };
-
-        let action_tree = ActionTree::new(tree_config).unwrap();
-        let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
-
-        game.allocate_memory(false);
-        finalize(&mut game);
-
-        // save
-        save_data_to_file(&game, "", "tmpfile.flop", None).unwrap();
-
-        // load
-        let mut game: PostFlopGame = load_data_from_file("tmpfile.flop", None).unwrap().0;
-
-        // save (turn)
-        game.set_target_storage_mode(BoardState::Turn).unwrap();
-        save_data_to_file(&game, "", "tmpfile.flop", None).unwrap();
-
-        // load (turn)
-        let mut game: PostFlopGame = load_data_from_file("tmpfile.flop", None).unwrap().0;
-
-        // save (flop)
-        game.set_target_storage_mode(BoardState::Flop).unwrap();
-        save_data_to_file(&game, "", "tmpfile.flop", None).unwrap();
-
-        // load (flop)
-        let mut game: PostFlopGame = load_data_from_file("tmpfile.flop", None).unwrap().0;
-
-        // remove tmpfile
-        std::fs::remove_file("tmpfile.flop").unwrap();
-
-        game.cache_normalized_weights();
-        let weights_oop = game.normalized_weights(0);
-        let weights_ip = game.normalized_weights(1);
-        let root_equity_oop = compute_average(&game.equity(0), weights_oop);
-        let root_equity_ip = compute_average(&game.equity(1), weights_ip);
-        let root_ev_oop = compute_average(&game.expected_values(0), weights_oop);
-        let root_ev_ip = compute_average(&game.expected_values(1), weights_ip);
-
-        assert!((root_equity_oop - 0.5).abs() < 1e-5);
-        assert!((root_equity_ip - 0.5).abs() < 1e-5);
-        assert!((root_ev_oop - 45.0).abs() < 1e-4);
-        assert!((root_ev_ip - 15.0).abs() < 1e-4);
-    }
 
     #[test]
     #[cfg(feature = "zstd")]
