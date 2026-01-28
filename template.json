@@ -1,0 +1,86 @@
+{
+  "description": "Postflop Solver Configuration Template",
+
+  "game": {
+    "starting_pot": 100,
+    "effective_stack": 200,
+    "rake_rate": 0.0,
+    "rake_cap": 0.0
+  },
+
+  "board": {
+    "flop": "Td9d6h",
+    "turn": "",
+    "river": ""
+  },
+
+  "ranges": {
+    "oop": "66+,A8s+,A5s-A4s,AJo+,K9s+,KQo,QTs+,JTs,96s+,85s+,75s+,65s,54s",
+    "ip": "QQ-22,AQs-A2s,ATo+,K5s+,KJo+,Q8s+,J8s+,T7s+,96s+,86s+,75s+,64s+,53s+"
+  },
+
+  "bet_sizes": {
+    "flop": {
+      "oop": {
+        "bet": "33%, 50%, 75%, 100%",
+        "raise": "50%, 100%"
+      },
+      "ip": {
+        "bet": "33%, 50%, 75%, 100%",
+        "raise": "50%, 100%"
+      }
+    },
+    "turn": {
+      "oop": {
+        "bet": "33%, 66%, 100%",
+        "raise": "50%, 100%"
+      },
+      "ip": {
+        "bet": "33%, 66%, 100%",
+        "raise": "50%, 100%"
+      }
+    },
+    "river": {
+      "oop": {
+        "bet": "33%, 66%, 100%",
+        "raise": "50%, 100%"
+      },
+      "ip": {
+        "bet": "33%, 66%, 100%",
+        "raise": "50%, 100%"
+      }
+    },
+    "donk": {
+      "turn": null,
+      "river": null
+    }
+  },
+
+  "tree_building": {
+    "add_allin_threshold": 1.5,
+    "force_allin_threshold": 0.15,
+    "merging_threshold": 0.1
+  },
+
+  "solver": {
+    "max_iterations": 1000,
+    "target_exploitability_percent": 0.5,
+    "use_compression": false,
+    "print_progress": true
+  },
+
+  "output": {
+    "save_file": "output.flop",
+    "print_strategy": true,
+    "print_ev": true
+  },
+
+  "_bet_size_formats": {
+    "_description": "Reference for bet size string formats",
+    "pot_relative": "33%, 50%, 75%, 100%, 150%",
+    "geometric": "e (auto-geometric), 2e (2-street geometric)",
+    "all_in": "a",
+    "additive": "100c (add 100 chips)",
+    "prev_bet_relative": "2x, 2.5x, 3x (for raises only)"
+  }
+}
