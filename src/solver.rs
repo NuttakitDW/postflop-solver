@@ -83,13 +83,13 @@ pub fn solve<T: Game>(
 
         // alternating updates
         for player in 0..2 {
-            let mut result = Vec::with_capacity(game.effective_num_hands(player));
+            let mut result = Vec::with_capacity(game.num_private_hands(player));
             solve_recursive(
                 result.spare_capacity_mut(),
                 game,
                 &mut root,
                 player,
-                game.effective_initial_weights(player ^ 1),
+                game.initial_weights(player ^ 1),
                 &params,
             );
         }
@@ -136,13 +136,13 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
 
     // alternating updates
     for player in 0..2 {
-        let mut result = Vec::with_capacity(game.effective_num_hands(player));
+        let mut result = Vec::with_capacity(game.num_private_hands(player));
         solve_recursive(
             result.spare_capacity_mut(),
             game,
             &mut root,
             player,
-            game.effective_initial_weights(player ^ 1),
+            game.initial_weights(player ^ 1),
             &params,
         );
     }

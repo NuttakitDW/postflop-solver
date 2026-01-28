@@ -102,31 +102,6 @@ struct SolverSettings {
 fn default_max_iterations() -> u32 { 1000 }
 fn default_target_exploitability() -> f32 { 0.5 }
 
-/// Abstraction settings
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AbstractionSettings {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default = "default_buckets")]
-    num_buckets: usize,
-    #[serde(default = "default_kmeans_iterations")]
-    kmeans_iterations: usize,
-}
-
-fn default_buckets() -> usize { 50 }
-fn default_kmeans_iterations() -> usize { 100 }
-
-impl Default for AbstractionSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            num_buckets: 50,
-            kmeans_iterations: 100,
-        }
-    }
-}
-
 /// Output settings
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,8 +122,6 @@ struct SolverConfig {
     bet_sizes: BetSizesConfig,
     tree: TreeSettings,
     solver: SolverSettings,
-    #[serde(default)]
-    abstraction: AbstractionSettings,
     output: OutputSettings,
 }
 
@@ -164,7 +137,6 @@ struct SolverResult {
     exploitability_percent: f32,
     memory_mb: f64,
     iterations_used: u32,
-    abstraction_enabled: bool,
     oop_hands: usize,
     ip_hands: usize,
     error: Option<String>,
@@ -213,11 +185,6 @@ fn generate_template() -> SolverConfig {
             max_iterations: 1000,
             target_exploitability_percent: 0.5,
             use_compression: false,
-        },
-        abstraction: AbstractionSettings {
-            enabled: true,
-            num_buckets: 50,
-            kmeans_iterations: 100,
         },
         output: OutputSettings {
             filename: "solution.flop".to_string(),
@@ -268,7 +235,6 @@ fn create_error_result(error: String) -> SolverResult {
         exploitability_percent: 0.0,
         memory_mb: 0.0,
         iterations_used: 0,
-        abstraction_enabled: false,
         oop_hands: 0,
         ip_hands: 0,
         error: Some(error),
@@ -458,30 +424,6 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let oop_hands = game.private_cards(0).len();
     let ip_hands = game.private_cards(1).len();
 
-    // Enable abstraction if configured
-    if config.abstraction.enabled {
-        let abs_config = AbstractionConfig {
-            num_buckets: config.abstraction.num_buckets,
-            max_iterations: config.abstraction.kmeans_iterations,
-        };
-        if let Err(e) = game.enable_abstraction(&abs_config) {
-            return SolverResult {
-                success: false,
-                output_file: String::new(),
-                solve_time_seconds: 0.0,
-                total_time_seconds: 0.0,
-                final_exploitability: 0.0,
-                exploitability_percent: 0.0,
-                memory_mb: 0.0,
-                iterations_used: 0,
-                abstraction_enabled: false,
-                oop_hands,
-                ip_hands,
-                error: Some(format!("Failed to enable abstraction: {}", e)),
-            };
-        }
-    }
-
     let (mem_uncompressed, _) = game.memory_usage();
     let memory_mb = mem_uncompressed as f64 / 1024.0 / 1024.0;
 
@@ -529,7 +471,6 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
             exploitability_percent,
             memory_mb,
             iterations_used: config.solver.max_iterations,
-            abstraction_enabled: config.abstraction.enabled,
             oop_hands,
             ip_hands,
             error: Some(format!("Failed to save file: {}", e)),
@@ -545,7 +486,6 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         exploitability_percent,
         memory_mb,
         iterations_used: config.solver.max_iterations,
-        abstraction_enabled: config.abstraction.enabled,
         oop_hands,
         ip_hands,
         error: None,
@@ -599,10 +539,6 @@ fn main() {
     );
     println!("Starting pot: {}", config.tree.starting_pot);
     println!("Effective stack: {}", config.tree.effective_stack);
-    println!("Abstraction: {} (buckets: {})",
-        if config.abstraction.enabled { "enabled" } else { "disabled" },
-        config.abstraction.num_buckets
-    );
     println!("Max iterations: {}", config.solver.max_iterations);
     println!("Target exploitability: {}% of pot", config.solver.target_exploitability_percent);
     println!("Output: {}", config.output.filename);

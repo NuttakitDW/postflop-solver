@@ -113,7 +113,7 @@ impl PostFlopGame {
     }
 }
 
-static VERSION_STR: &str = "2024-01-27-abstraction";
+static VERSION_STR: &str = "2026-01-28";
 
 thread_local! {
     static PTR_BASE: Cell<[*const u8; 2]> = Cell::new([ptr::null(); 2]);
@@ -162,10 +162,6 @@ impl Encode for PostFlopGame {
         let mut locking_strategy = self.locking_strategy.clone();
         locking_strategy.retain(|&i, _| i < num_nodes);
         locking_strategy.encode(encoder)?;
-
-        // hand abstraction
-        self.abstraction_enabled.encode(encoder)?;
-        self.abstraction_data.encode(encoder)?;
 
         // store base pointers
         PTR_BASE.with(|c| {
@@ -225,8 +221,6 @@ impl<Context> Decode<Context> for PostFlopGame {
             storage_ip: Decode::decode(decoder)?,
             storage_chance: Decode::decode(decoder)?,
             locking_strategy: Decode::decode(decoder)?,
-            abstraction_enabled: Decode::decode(decoder)?,
-            abstraction_data: Decode::decode(decoder)?,
             ..Default::default()
         };
 
@@ -238,9 +232,8 @@ impl<Context> Decode<Context> for PostFlopGame {
             game.storage_chance.len() / 1_048_576
         );
         log_info!(
-            "[DECODE] Compression: {}, abstraction: {}",
-            game.is_compression_enabled,
-            game.abstraction_enabled
+            "[DECODE] Compression: {}",
+            game.is_compression_enabled
         );
 
         game.target_storage_mode = game.storage_mode;

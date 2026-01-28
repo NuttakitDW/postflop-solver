@@ -43,9 +43,7 @@ impl Game for PostFlopGame {
         player: usize,
         cfreach: &[f32],
     ) {
-        if self.abstraction_enabled {
-            self.evaluate_internal_abstracted(result, node, player, cfreach);
-        } else if self.bunching_num_dead_cards == 0 {
+        if self.bunching_num_dead_cards == 0 {
             self.evaluate_internal(result, node, player, cfreach);
         } else {
             self.evaluate_internal_bunching(result, node, player, cfreach);
@@ -85,11 +83,6 @@ impl Game for PostFlopGame {
 
     #[inline]
     fn isomorphic_chances(&self, node: &Self::Node) -> &[u8] {
-        // Disable isomorphism when abstraction is enabled
-        // because swap lists use hand indices, not bucket indices
-        if self.abstraction_enabled {
-            return &[];
-        }
         if node.turn == NOT_DEALT {
             &self.isomorphism_ref_turn
         } else {
@@ -120,27 +113,6 @@ impl Game for PostFlopGame {
     #[inline]
     fn is_compression_enabled(&self) -> bool {
         self.is_compression_enabled
-    }
-
-    #[inline]
-    fn effective_num_hands(&self, player: usize) -> usize {
-        self.effective_hand_count(player)
-    }
-
-    #[inline]
-    fn effective_initial_weights(&self, player: usize) -> &[f32] {
-        if self.abstraction_enabled {
-            self.abstraction_data
-                .as_ref()
-                .map_or(&self.initial_weights[player], |data| &data.bucket_weights[player])
-        } else {
-            &self.initial_weights[player]
-        }
-    }
-
-    #[inline]
-    fn is_abstraction_enabled(&self) -> bool {
-        self.abstraction_enabled
     }
 
     #[inline]
@@ -309,44 +281,6 @@ impl PostFlopGame {
         (uncompressed, compressed)
     }
 
-    /// Returns the estimated memory usage with abstraction enabled.
-    ///
-    /// This provides an estimate without actually enabling abstraction,
-    /// useful for UI display before the user commits to running the solver.
-    #[inline]
-    pub fn memory_usage_with_abstraction(&self, num_buckets: usize) -> (u64, u64) {
-        if self.state <= State::Uninitialized {
-            panic!("Game is not successfully initialized");
-        }
-
-        // If abstraction is already enabled, just return current memory usage
-        if self.abstraction_enabled {
-            return self.memory_usage();
-        }
-
-        // Calculate the scaling factor based on bucket count vs hand count
-        // Memory is roughly proportional to (hands_oop * hands_ip) for strategy storage
-        let hands_oop = self.num_private_hands(0) as f64;
-        let hands_ip = self.num_private_hands(1) as f64;
-        let buckets = num_buckets as f64;
-
-        // The scaling factor for the main storage components
-        // Storage scales with bucket_count instead of hand_count for each player
-        let scale_factor = (buckets * buckets) / (hands_oop * hands_ip);
-
-        // Current memory usage components
-        let current_elements = 2 * self.num_storage + self.num_storage_ip + self.num_storage_chance;
-
-        // Estimate new elements with abstraction
-        // The misc_memory_usage is largely fixed (tree structure, etc.)
-        let estimated_elements = (current_elements as f64 * scale_factor) as u64;
-
-        let uncompressed = 4 * estimated_elements + self.misc_memory_usage;
-        let compressed = 2 * estimated_elements + self.misc_memory_usage;
-
-        (uncompressed, compressed)
-    }
-
     /// Returns the estimated additional memory usage in bytes when the bunching effect is enabled.
     #[inline]
     pub fn memory_usage_bunching(&self) -> u64 {
@@ -355,129 +289,6 @@ impl PostFlopGame {
         }
 
         self.memory_usage_bunching_internal()
-    }
-
-    /// Enables hand abstraction with the given configuration.
-    ///
-    /// This must be called after the game is initialized (via `with_config` or `update_config`)
-    /// but before `allocate_memory()` is called.
-    ///
-    /// Hand abstraction groups similar hands into buckets, significantly reducing memory usage
-    /// and solving time at the cost of some accuracy.
-    ///
-    /// # Arguments
-    /// * `config` - Configuration specifying number of buckets and clustering parameters
-    ///
-    /// # Errors
-    /// Returns an error if called after memory has been allocated.
-    pub fn enable_abstraction(&mut self, config: &AbstractionConfig) -> Result<(), String> {
-        if self.state <= State::Uninitialized {
-            return Err("Game is not successfully initialized".to_string());
-        }
-
-        if self.state >= State::MemoryAllocated {
-            return Err("Cannot enable abstraction after memory is allocated".to_string());
-        }
-
-        // Compute abstraction data
-        let abstraction_data = AbstractionData::compute(self, config);
-
-        // Rebuild the tree with bucket-based storage counts
-        self.abstraction_enabled = true;
-        self.abstraction_data = Some(abstraction_data);
-
-        // Rebuild the tree to recalculate storage with bucket counts
-        self.rebuild_tree_for_abstraction()?;
-
-        Ok(())
-    }
-
-    /// Returns whether hand abstraction is enabled.
-    #[inline]
-    pub fn is_abstraction_enabled(&self) -> bool {
-        self.abstraction_enabled
-    }
-
-    /// Returns the abstraction data if abstraction is enabled.
-    #[inline]
-    pub fn abstraction_data(&self) -> Option<&AbstractionData> {
-        self.abstraction_data.as_ref()
-    }
-
-    /// Returns the effective hand count for storage allocation.
-    ///
-    /// When abstraction is enabled, returns the number of buckets.
-    /// Otherwise, returns the number of private hands.
-    #[inline]
-    pub fn effective_hand_count(&self, player: usize) -> usize {
-        if self.abstraction_enabled {
-            self.abstraction_data
-                .as_ref()
-                .map_or(self.num_private_hands(player), |data| data.num_buckets(player))
-        } else {
-            self.num_private_hands(player)
-        }
-    }
-
-    /// Rebuilds the tree storage counts for abstracted mode.
-    fn rebuild_tree_for_abstraction(&mut self) -> Result<(), String> {
-        // Reset storage counters
-        self.num_storage = 0;
-        self.num_storage_ip = 0;
-        self.num_storage_chance = 0;
-
-        // Traverse the tree and recalculate storage
-        self.recalculate_storage_recursive(0);
-
-        Ok(())
-    }
-
-    /// Recursively recalculates storage counts for all nodes.
-    fn recalculate_storage_recursive(&mut self, node_index: usize) {
-        let node = self.node_arena[node_index].lock();
-
-        if node.is_terminal() {
-            return;
-        }
-
-        let num_children = node.num_children as usize;
-        let children_offset = node.children_offset as usize;
-        let is_chance = node.is_chance();
-        let player = node.player as usize;
-
-        drop(node);
-
-        if is_chance {
-            // For chance nodes, recalculate num_elements using effective hand count
-            let mut node = self.node_arena[node_index].lock();
-            node.num_elements = node
-                .cfvalue_storage_player()
-                .map_or(0, |p| self.effective_hand_count(p)) as u32;
-            self.num_storage_chance += node.num_elements as u64;
-            drop(node);
-
-            for action_index in 0..num_children {
-                let child_index = node_index + children_offset + action_index;
-                self.recalculate_storage_recursive(child_index);
-            }
-        } else {
-            // For action nodes, recalculate num_elements using effective hand count
-            let effective_hands = self.effective_hand_count(player);
-            let mut node = self.node_arena[node_index].lock();
-            node.num_elements = (node.num_actions() * effective_hands) as u32;
-            node.num_elements_ip = match node.prev_action {
-                Action::None | Action::Chance(_) => self.effective_hand_count(PLAYER_IP as usize) as u16,
-                _ => 0,
-            };
-            self.num_storage += node.num_elements as u64;
-            self.num_storage_ip += node.num_elements_ip as u64;
-            drop(node);
-
-            for action_index in 0..num_children {
-                let child_index = node_index + children_offset + action_index;
-                self.recalculate_storage_recursive(child_index);
-            }
-        }
     }
 
     /// Remove lines after building the `PostFlopGame` but before allocating memory.
