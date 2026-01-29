@@ -31,7 +31,7 @@
     "rakeCap": 0.0,
     "donkOption": 3,
     "addAllInThreshold": 150,
-    "forceAllInThreshold": 50,
+    "forceAllInThreshold": 20,
     "mergingThreshold": 10,
     "maxRaisesPerStreet": 4
   },

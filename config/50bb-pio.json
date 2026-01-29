@@ -42,7 +42,7 @@
   },
   "output": {
     "filename": "50bb-pio.flop",
-    "compressionLevel": null,
+    "compressionLevel": 3,
     "memo": "Td9d6h flop, pot=61, stack=477 (50bb)"
   }
 }
