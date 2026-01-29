@@ -200,7 +200,7 @@ impl GameNode for PostFlopNode {
 
     #[inline]
     fn enable_parallelization(&self) -> bool {
-        self.river == NOT_DEALT
+        true
     }
 }
 
