@@ -31,13 +31,13 @@
     "rakeCap": 0.0,
     "donkOption": 3,
     "addAllInThreshold": 150,
-    "forceAllInThreshold": 20,
+    "forceAllInThreshold": 50,
     "mergingThreshold": 10,
     "maxRaisesPerStreet": 4
   },
   "solver": {
-    "maxIterations": 500,
-    "targetExploitabilityPercent": 0.1,
+    "maxIterations": 1000,
+    "targetExploitabilityPercent": 2,
     "useCompression": false
   },
   "output": {
