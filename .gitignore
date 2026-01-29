@@ -1,4 +1,7 @@
 /target
 Cargo.lock
-*.flop
-*.json
+
+# Output files (large solver output)
+out/*.flop
+
+# Keep config/*.json tracked

@@ -1,0 +1,48 @@
+{
+  "board": {
+    "flop": "Td9d6h",
+    "turn": "Qc",
+    "river": "2s"
+  },
+  "ranges": {
+    "oop": "22+, A2s+, K2s+, Q2s+, J2s+, T2s+, 92s+, 82s+, 72s+, 62s+, 52s+, 42s+, 32s, A2o+, K2o+, Q2o+, J2o+, T2o+, 92o+, 82o+, 72o+, 62o+, 52o+, 42o+, 32o",
+    "ip": "22+, A2s+, K2s+, Q2s+, J2s+, T2s+, 92s+, 82s+, 72s+, 62s+, 52s+, 42s+, 32s, A2o+, K2o+, Q2o+, J2o+, T2o+, 92o+, 82o+, 72o+, 62o+, 52o+, 42o+, 32o"
+  },
+  "betSizes": {
+    "oopFlopBet": "33",
+    "oopFlopRaise": "50",
+    "oopTurnBet": "50",
+    "oopTurnRaise": "50",
+    "oopTurnDonk": "",
+    "oopRiverBet": "33, 66, 100, a",
+    "oopRiverRaise": "50",
+    "oopRiverDonk": "",
+    "ipFlopBet": "33",
+    "ipFlopRaise": "50",
+    "ipTurnBet": "50",
+    "ipTurnRaise": "50",
+    "ipRiverBet": "33, 66, 100, a",
+    "ipRiverRaise": "50"
+  },
+  "tree": {
+    "startingPot": 100,
+    "effectiveStack": 500,
+    "rakePercent": 0.0,
+    "rakeCap": 0.0,
+    "donkOption": 0,
+    "addAllInThreshold": 150.0,
+    "forceAllInThreshold": 20.0,
+    "mergingThreshold": 10.0,
+    "maxRaisesPerStreet": 3
+  },
+  "solver": {
+    "maxIterations": 10,
+    "targetExploitabilityPercent": 0.5,
+    "useCompression": false
+  },
+  "output": {
+    "filename": "mario.flop",
+    "compressionLevel": null,
+    "memo": "Mario Pixel Art Test"
+  }
+}

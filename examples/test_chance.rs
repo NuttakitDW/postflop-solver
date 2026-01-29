@@ -3,9 +3,9 @@ use postflop_solver::*;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    println!("Loading 50bb.flop...");
+    println!("Loading out/50bb.flop...");
     let (mut game, memo): (PostFlopGame, String) =
-        load_data_from_file("50bb.flop", None).expect("Failed to load");
+        load_data_from_file("out/50bb.flop", None).expect("Failed to load");
 
     println!("Loaded! Memo: {}", memo);
     println!("Is solved: {}", game.is_solved());

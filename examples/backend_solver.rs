@@ -6,7 +6,7 @@
 //! Output: .flop file that can be loaded in desktop-postflop
 //!
 //! Usage:
-//!   cargo run --example backend_solver --release --features "bincode zstd" -- config.json
+//!   cargo run --example backend_solver --release --features "bincode zstd" -- config/50bb.json
 //!   cargo run --example backend_solver --release --features "bincode zstd" -- --generate-template
 //!
 //! The JSON format matches the desktop-postflop configurations.json format.
@@ -507,15 +507,15 @@ fn main() {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  <config.json>       Path to JSON configuration file");
-        eprintln!("  --generate-template Generate a template config file (template.json)");
+        eprintln!("  --generate-template Generate a template config file (config/template.json)");
         std::process::exit(1);
     }
 
     if args[1] == "--generate-template" {
         let template = generate_template();
         let json = serde_json::to_string_pretty(&template).expect("Failed to serialize template");
-        fs::write("template.json", &json).expect("Failed to write template file");
-        println!("Template written to template.json");
+        fs::write("config/template.json", &json).expect("Failed to write template file");
+        println!("Template written to config/template.json");
         println!();
         println!("{}", json);
         return;
