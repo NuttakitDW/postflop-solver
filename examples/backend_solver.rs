@@ -11,6 +11,13 @@
 //!
 //! The JSON format matches the desktop-postflop configurations.json format.
 
+#[cfg(feature = "jemalloc")]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use postflop_solver::*;
 use serde::{Deserialize, Serialize};
 use std::env;
