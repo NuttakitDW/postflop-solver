@@ -3,10 +3,10 @@
 CONFIG ?= config/50bb.json
 
 start:
-	cargo run --example backend_solver --release --features "bincode rayon zstd" -- $(CONFIG)
+	cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc" -- $(CONFIG)
 
 build:
-	cargo build --example backend_solver --release --features "bincode rayon"
+	cargo build --example backend_solver --release --features "bincode rayon zstd jemalloc"
 
 clean:
 	cargo clean
