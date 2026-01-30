@@ -9,19 +9,19 @@
     "ip": "22+,A2+,K2s+,K6o+,K5o:0.36,Q2s+,Q8o+,Q7o:0.97,J2s+,J8o+,T3s+,T8o+,T7o:0.36,95s+,98o,97o:0.52,85s+,87o,74s+,64s+,53s+"
   },
   "betSizes": {
-    "oopFlopBet": "33",
+    "oopFlopBet": "33, 85",
     "oopFlopRaise": "33, 60",
-    "oopTurnBet": "33, 2e, 75, 125",
+    "oopTurnBet": "33, 85",
     "oopTurnRaise": "33, 60",
     "oopTurnDonk": "33, 60",
-    "oopRiverBet": "33, 2e, 75, 125",
+    "oopRiverBet": "33, 85",
     "oopRiverRaise": "33, 60",
     "oopRiverDonk": "33, 60",
-    "ipFlopBet": "25, 55, 85, 125",
+    "ipFlopBet": "33, 85",
     "ipFlopRaise": "33, 60",
-    "ipTurnBet": "33, 2e, 75, 125",
+    "ipTurnBet": "33, 85",
     "ipTurnRaise": "33, 60",
-    "ipRiverBet": "55, 2e, 75, 125",
+    "ipRiverBet": "33, 85",
     "ipRiverRaise": "33, 60"
   },
   "tree": {
@@ -30,7 +30,7 @@
     "rakePercent": 0.0,
     "rakeCap": 0.0,
     "donkOption": 0,
-    "addAllInThreshold": 600,
+    "addAllInThreshold": 150,
     "forceAllInThreshold": 50,
     "mergingThreshold": 10,
     "maxRaisesPerStreet": 4

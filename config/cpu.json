@@ -9,20 +9,20 @@
     "ip": "22+,A2+,K2s+,K6o+,K5o:0.36,Q2s+,Q8o+,Q7o:0.97,J2s+,J8o+,T3s+,T8o+,T7o:0.36,95s+,98o,97o:0.52,85s+,87o,74s+,64s+,53s+"
   },
   "betSizes": {
-    "oopFlopBet": "33",
-    "oopFlopRaise": "33, 60",
-    "oopTurnBet": "33, 2e, 75, 125",
-    "oopTurnRaise": "33, 60",
-    "oopTurnDonk": "33, 60",
-    "oopRiverBet": "33, 2e, 75, 125",
-    "oopRiverRaise": "33, 60",
-    "oopRiverDonk": "33, 60",
-    "ipFlopBet": "25, 55, 85, 125",
-    "ipFlopRaise": "33, 60",
-    "ipTurnBet": "33, 2e, 75, 125",
-    "ipTurnRaise": "33, 60",
-    "ipRiverBet": "55, 2e, 75, 125",
-    "ipRiverRaise": "33, 60"
+    "oopFlopBet": "33, a",
+    "oopFlopRaise": "33, 55, a",
+    "oopTurnBet": "33, 2e, a",
+    "oopTurnRaise": "33, 55, a",
+    "oopTurnDonk": "33, 55, a",
+    "oopRiverBet": "33, 55, 2e, a",
+    "oopRiverRaise": "33, 55, a",
+    "oopRiverDonk": "33, 55, a",
+    "ipFlopBet": "25, 55, 85, 125, a",
+    "ipFlopRaise": "33, 55, a",
+    "ipTurnBet": "33, 2e, 125, a",
+    "ipTurnRaise": "33, 55, a",
+    "ipRiverBet": "55, 2e, 125, a",
+    "ipRiverRaise": "33, 55, a"
   },
   "tree": {
     "startingPot": 61,
@@ -30,7 +30,7 @@
     "rakePercent": 0.0,
     "rakeCap": 0.0,
     "donkOption": 0,
-    "addAllInThreshold": 600,
+    "addAllInThreshold": 150,
     "forceAllInThreshold": 50,
     "mergingThreshold": 10,
     "maxRaisesPerStreet": 4
@@ -38,11 +38,11 @@
   "solver": {
     "maxIterations": 1000,
     "targetExploitabilityPercent": 0.3,
-    "useCompression": true
+    "useCompression": false
   },
   "output": {
-    "filename": "50bb.flop",
-    "compressionLevel": 10,
+    "filename": "out/50bb-pio.flop",
+    "compressionLevel": 3,
     "memo": "Td9d6h flop, pot=61, stack=477 (50bb)"
   }
 }
