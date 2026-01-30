@@ -38,10 +38,10 @@
   "solver": {
     "maxIterations": 1000,
     "targetExploitabilityPercent": 0.3,
-    "useCompression": false
+    "useCompression": true
   },
   "output": {
-    "filename": "out/50bb-pio.flop",
+    "filename": "out/50bb-pio-compressed.flop",
     "compressionLevel": 3,
     "memo": "Td9d6h flop, pot=61, stack=477 (50bb)"
   }
