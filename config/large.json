@@ -37,12 +37,12 @@
   },
   "solver": {
     "maxIterations": 1000,
-    "targetExploitabilityPercent": 2,
-    "useCompression": false
+    "targetExploitabilityPercent": 0.3,
+    "useCompression": true
   },
   "output": {
     "filename": "50bb.flop",
-    "compressionLevel": null,
+    "compressionLevel": 10,
     "memo": "Td9d6h flop, pot=61, stack=477 (50bb)"
   }
 }
