@@ -11,20 +11,20 @@
   },
 
   "betSizes": {
-    "oopFlopBet": "33",
-    "oopFlopRaise": "60",
-    "oopTurnBet": "33, 75",
-    "oopTurnRaise": "60",
+    "oopFlopBet": "33, a",
+    "oopFlopRaise": "33, 55, a",
+    "oopTurnBet": "20, 33, 55, 83, 125, 200, a",
+    "oopTurnRaise": "33, 55, a",
     "oopTurnDonk": "",
-    "oopRiverBet": "33, 75",
-    "oopRiverRaise": "60",
+    "oopRiverBet": "11, 35, 60, 85, 149, a",
+    "oopRiverRaise": "33, 55, a",
     "oopRiverDonk": "",
-    "ipFlopBet": "33, 75",
-    "ipFlopRaise": "60",
-    "ipTurnBet": "33, 75",
-    "ipTurnRaise": "60",
-    "ipRiverBet": "33, 75",
-    "ipRiverRaise": "60"
+    "ipFlopBet": "20, 33, 55, 83, 125, a",
+    "ipFlopRaise": "33, 55, a",
+    "ipTurnBet": "20, 33, 55, 83, 125, 200, a",
+    "ipTurnRaise": "33, 55, a",
+    "ipRiverBet": "11, 35, 60, 85, 149, a",
+    "ipRiverRaise": "33, 55, a"
   },
 
   "tree": {
@@ -39,6 +39,7 @@
   },
 
   "output": {
-    "filename": "solution.flop"
+    "filename": "solution_full.flop",
+    "memo": "Full tree solving"
   }
 }
