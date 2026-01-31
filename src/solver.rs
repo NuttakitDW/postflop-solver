@@ -15,11 +15,15 @@ struct DiscountParams {
 }
 
 impl DiscountParams {
-    pub fn new(current_iteration: u32) -> Self {
+    pub fn new(current_iteration: u32, disable_reset: bool) -> Self {
         // 0, 1, 4, 16, 64, 256, ...
-        let nearest_lower_power_of_4 = match current_iteration {
-            0 => 0,
-            x => 1 << ((x.leading_zeros() ^ 31) & !1),
+        let nearest_lower_power_of_4 = if disable_reset {
+            0
+        } else {
+            match current_iteration {
+                0 => 0,
+                x => 1 << ((x.leading_zeros() ^ 31) & !1),
+            }
         };
 
         let t_alpha = (current_iteration as i32 - 1).max(0) as f64;
@@ -79,7 +83,10 @@ pub fn solve<T: Game>(
             break;
         }
 
-        let params = DiscountParams::new(t);
+        // Disable reset when exploitability is below 0.5% to avoid late-stage spikes
+        let current_percent = exploitability / starting_pot * 100.0;
+        let disable_reset = starting_pot > 0.0 && current_percent < 0.5;
+        let params = DiscountParams::new(t, disable_reset);
 
         // alternating updates
         for player in 0..2 {
@@ -132,7 +139,7 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration);
+    let params = DiscountParams::new(current_iteration, false);
 
     // alternating updates
     for player in 0..2 {
