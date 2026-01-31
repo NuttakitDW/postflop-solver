@@ -38,11 +38,21 @@
   "solver": {
     "maxIterations": 1000,
     "targetExploitabilityPercent": 0.3,
-    "useCompression": true
+    "useCompression": true,
+    "mode": "subgame",
+    "subgame": {
+      "turnBuckets": 5,
+      "riverBuckets": 5,
+      "blueprintIterations": 300,
+      "blueprintExploitabilityPercent": 3.0,
+      "subgameIterations": 500,
+      "subgameExploitabilityPercent": 0.5,
+      "safeSolving": false
+    }
   },
   "output": {
-    "filename": "50bb.flop",
+    "filename": "50bb_small.flop",
     "compressionLevel": 10,
-    "memo": "Td9d6h flop, pot=61, stack=477 (50bb)"
+    "memo": "Td9d6h flop, pot=61, stack=477 (50bb) - small config with subgame"
   }
 }
