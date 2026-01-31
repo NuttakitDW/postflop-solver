@@ -41,7 +41,7 @@
     "useCompression": true
   },
   "output": {
-    "filename": "50bb.flop",
+    "filename": "out/50bb-medium.flop",
     "compressionLevel": 10,
     "memo": "Td9d6h flop, pot=61, stack=477 (50bb)"
   }
