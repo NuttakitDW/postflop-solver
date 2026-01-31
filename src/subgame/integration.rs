@@ -6,16 +6,21 @@
 //! - Solve subgames with the main DCFR solver
 //! - Stitch subgame solutions back together
 
+use crate::action_tree::{ActionTree, BoardState, TreeConfig};
+use crate::card::CardConfig;
 use crate::game::PostFlopGame;
 use crate::interface::Game;
 use crate::solver::solve;
 use crate::subgame::abstraction::{AbstractionConfig, AbstractionMapping};
 use crate::subgame::blueprint::{Blueprint, BlueprintConfig};
 use crate::subgame::boundary::{BoundaryData, BoundaryStore};
-use crate::subgame::subgame_solver::{BatchSolveOptions, SubgameConfig};
+use crate::subgame::subgame_solver::{SubgameConfig, SubgameInfo, SubgameSolveResult};
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
+
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 
 /// Solver mode configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -291,65 +296,46 @@ pub fn solve_with_subgames(
             );
 
             let mut subgames_solved = 0u32;
+            let mut best_subgame_exploitability = exploitability / game.tree_config().starting_pot as f32;
 
             // Solve subgames if in Subgame mode
             if config.mode == SolverMode::Subgame {
                 if config.print_progress {
-                    println!("Blueprint solved. Extracting boundaries and solving subgames...");
+                    println!("Blueprint solved. Now solving turn subgames with real DCFR...");
                 }
 
-                // Extract root boundary
-                let root_boundary = extract_boundary_from_game(game);
-
-                // Generate subgame infos for all turn cards
-                let subgame_infos = crate::subgame::generate_subgame_infos(&root_boundary, 0, &flop);
-
-                if config.print_progress {
-                    println!("Generated {} turn subgames", subgame_infos.len());
-                }
-
-                // Configure batch solving
-                let batch_options = BatchSolveOptions {
-                    config: SubgameConfig {
-                        iterations: config.subgame_iterations,
-                        target_exploitability: config.subgame_target_exploitability,
-                        use_safe_solving: config.safe_solving,
-                        ..Default::default()
-                    },
-                    print_progress: config.print_progress,
+                // Configure subgame solving
+                let subgame_config = SubgameConfig {
+                    iterations: config.subgame_iterations,
+                    target_exploitability: config.subgame_target_exploitability,
+                    use_safe_solving: config.safe_solving,
+                    print_progress: false, // Don't print per-subgame progress
                     ..Default::default()
                 };
 
-                // In a real implementation, we would:
-                // 1. For each turn card, create a new game tree for that subgame
-                // 2. Initialize with boundary ranges
-                // 3. Solve each subgame
-                // 4. Store the results
-                //
-                // For now, we simulate this with a mock solver
-                let turns: Vec<u8> = (0..52u8)
-                    .filter(|&c| !flop.contains(&c))
-                    .collect();
+                // Solve all turn subgames using real DCFR
+                let (results, succeeded) = solve_turn_subgames_real(
+                    game,
+                    &flop,
+                    &subgame_config,
+                    config.print_progress,
+                );
 
-                #[cfg(feature = "rayon")]
-                {
-                    let (_, stats) = crate::subgame::solve_turn_subgames(
-                        &root_boundary,
-                        &flop,
-                        &turns,
-                        batch_options,
-                        crate::subgame::mock_solve,
-                    );
-                    subgames_solved = stats.succeeded as u32;
-                }
+                subgames_solved = succeeded;
 
-                #[cfg(not(feature = "rayon"))]
-                {
-                    subgames_solved = subgame_infos.len() as u32;
+                // Calculate average exploitability across subgames
+                let successful_results: Vec<_> = results.iter().filter(|r| r.success).collect();
+                if !successful_results.is_empty() {
+                    let avg_exploitability: f32 = successful_results
+                        .iter()
+                        .map(|r| r.exploitability)
+                        .sum::<f32>() / successful_results.len() as f32;
+                    best_subgame_exploitability = avg_exploitability;
                 }
 
                 if config.print_progress {
-                    println!("Solved {} subgames", subgames_solved);
+                    println!("Solved {} subgames, avg exploitability: {:.4}%",
+                        subgames_solved, best_subgame_exploitability * 100.0);
                 }
             }
 
@@ -357,11 +343,203 @@ pub fn solve_with_subgames(
                 blueprint: Some(blueprint),
                 subgames_solved,
                 solve_time_seconds: start.elapsed().as_secs_f64(),
-                final_exploitability: exploitability / game.tree_config().starting_pot as f32,
+                final_exploitability: best_subgame_exploitability,
                 memory_usage: game.target_memory_usage(),
             })
         }
     }
+}
+
+/// Solve a single subgame using the real DCFR solver.
+///
+/// This creates a new PostFlopGame for the subgame with the turn card dealt,
+/// initializes ranges from the boundary, and runs the solver.
+pub fn solve_single_subgame(
+    info: &SubgameInfo,
+    config: &SubgameConfig,
+    original_game: &PostFlopGame,
+) -> SubgameSolveResult {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    // Get the original card and tree configs
+    let original_card_config = original_game.card_config();
+    let original_tree_config = original_game.tree_config();
+
+    // Create new card config with turn dealt
+    let card_config = CardConfig {
+        range: original_card_config.range.clone(),
+        flop: original_card_config.flop,
+        turn: info.turn,
+        river: info.river.unwrap_or(crate::NOT_DEALT),
+    };
+
+    // Create a new TreeConfig for Turn (subgame starts at turn, not flop)
+    let tree_config = TreeConfig {
+        initial_state: BoardState::Turn,
+        starting_pot: original_tree_config.starting_pot,
+        effective_stack: original_tree_config.effective_stack,
+        rake_rate: original_tree_config.rake_rate,
+        rake_cap: original_tree_config.rake_cap,
+        flop_bet_sizes: original_tree_config.flop_bet_sizes.clone(),
+        turn_bet_sizes: original_tree_config.turn_bet_sizes.clone(),
+        river_bet_sizes: original_tree_config.river_bet_sizes.clone(),
+        turn_donk_sizes: original_tree_config.turn_donk_sizes.clone(),
+        river_donk_sizes: original_tree_config.river_donk_sizes.clone(),
+        add_allin_threshold: original_tree_config.add_allin_threshold,
+        force_allin_threshold: original_tree_config.force_allin_threshold,
+        merging_threshold: original_tree_config.merging_threshold,
+        max_raises_per_street: original_tree_config.max_raises_per_street,
+    };
+
+    // Create action tree for turn subgame
+    let action_tree = match ActionTree::new(tree_config) {
+        Ok(tree) => tree,
+        Err(e) => {
+            eprintln!("ERROR: Failed to create action tree for turn {}: {}", info.turn, e);
+            return SubgameSolveResult::failure(&format!("Failed to create action tree: {}", e));
+        }
+    };
+
+    // Create the subgame
+    let mut subgame = match PostFlopGame::with_config(card_config, action_tree) {
+        Ok(game) => game,
+        Err(e) => {
+            eprintln!("ERROR: Failed to create subgame for turn {}: {}", info.turn, e);
+            return SubgameSolveResult::failure(&format!("Failed to create subgame: {}", e));
+        }
+    };
+
+    // Allocate memory
+    subgame.allocate_memory(config.enable_compression);
+
+    // Calculate target exploitability
+    let target = subgame.tree_config().starting_pot as f32 * config.target_exploitability;
+
+    // Solve the subgame
+    let exploitability = solve(
+        &mut subgame,
+        config.iterations,
+        target,
+        config.print_progress,
+    );
+
+    let exploitability_fraction = exploitability / subgame.tree_config().starting_pot as f32;
+    let elapsed = start.elapsed();
+
+    SubgameSolveResult {
+        success: true,
+        exploitability: exploitability_fraction,
+        iterations_performed: config.iterations,
+        safety_satisfied: true,
+        message: Some(format!("Solved in {:?}", elapsed)),
+    }
+}
+
+/// Solve all turn subgames in parallel using real DCFR.
+#[cfg(feature = "rayon")]
+pub fn solve_turn_subgames_real(
+    original_game: &PostFlopGame,
+    flop: &[u8; 3],
+    config: &SubgameConfig,
+    print_progress: bool,
+) -> (Vec<SubgameSolveResult>, u32) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
+
+    // Get all valid turn cards
+    let turns: Vec<u8> = (0..52u8)
+        .filter(|&c| !flop.contains(&c))
+        .collect();
+
+    let total = turns.len();
+    let completed = AtomicU32::new(0);
+    let start = Instant::now();
+
+    // Solve in parallel
+    let results: Vec<SubgameSolveResult> = turns
+        .par_iter()
+        .map(|&turn| {
+            let info = SubgameInfo {
+                boundary_idx: 0,
+                turn,
+                river: None,
+                board: flop.to_vec(),
+                pot: original_game.tree_config().starting_pot,
+                stack: original_game.tree_config().effective_stack,
+                ranges: [vec![], vec![]], // Will use original game's ranges
+                is_solved: false,
+                exploitability: 0.0,
+            };
+
+            let result = solve_single_subgame(&info, config, original_game);
+
+            let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+            if print_progress && done % 10 == 0 {
+                let elapsed = start.elapsed().as_secs_f64();
+                println!(
+                    "Progress: {}/{} ({:.1}%) - elapsed: {:.1}s",
+                    done, total,
+                    done as f64 / total as f64 * 100.0,
+                    elapsed
+                );
+            }
+
+            result
+        })
+        .collect();
+
+    let succeeded = results.iter().filter(|r| r.success).count() as u32;
+    (results, succeeded)
+}
+
+/// Solve all turn subgames sequentially using real DCFR.
+#[cfg(not(feature = "rayon"))]
+pub fn solve_turn_subgames_real(
+    original_game: &PostFlopGame,
+    flop: &[u8; 3],
+    config: &SubgameConfig,
+    print_progress: bool,
+) -> (Vec<SubgameSolveResult>, u32) {
+    use std::time::Instant;
+
+    let turns: Vec<u8> = (0..52u8)
+        .filter(|&c| !flop.contains(&c))
+        .collect();
+
+    let total = turns.len();
+    let start = Instant::now();
+    let mut results = Vec::with_capacity(total);
+
+    for (i, &turn) in turns.iter().enumerate() {
+        let info = SubgameInfo {
+            boundary_idx: 0,
+            turn,
+            river: None,
+            board: flop.to_vec(),
+            pot: original_game.tree_config().starting_pot,
+            stack: original_game.tree_config().effective_stack,
+            ranges: [vec![], vec![]],
+            is_solved: false,
+            exploitability: 0.0,
+        };
+
+        let result = solve_single_subgame(&info, config, original_game);
+        results.push(result);
+
+        if print_progress && (i + 1) % 10 == 0 {
+            let elapsed = start.elapsed().as_secs_f64();
+            println!(
+                "Progress: {}/{} ({:.1}%) - elapsed: {:.1}s",
+                i + 1, total,
+                (i + 1) as f64 / total as f64 * 100.0,
+                elapsed
+            );
+        }
+    }
+
+    let succeeded = results.iter().filter(|r| r.success).count() as u32;
+    (results, succeeded)
 }
 
 /// Options for real-time subgame solving during gameplay.

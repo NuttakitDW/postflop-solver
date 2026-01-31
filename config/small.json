@@ -46,7 +46,7 @@
       "blueprintIterations": 300,
       "blueprintExploitabilityPercent": 3.0,
       "subgameIterations": 500,
-      "subgameExploitabilityPercent": 0.5,
+      "subgameExploitabilityPercent": 0.3,
       "safeSolving": false
     }
   },
