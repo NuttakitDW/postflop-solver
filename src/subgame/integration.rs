@@ -22,6 +22,39 @@ use bincode::{Decode, Encode};
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
+/// Macro for conditional info logging
+#[cfg(feature = "logging")]
+macro_rules! log_info {
+    ($($arg:tt)*) => { log::info!($($arg)*); };
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_info {
+    ($($arg:tt)*) => {};
+}
+
+/// Macro for conditional debug logging
+#[cfg(feature = "logging")]
+macro_rules! log_debug {
+    ($($arg:tt)*) => { log::debug!($($arg)*); };
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {};
+}
+
+/// Macro for conditional error logging
+#[cfg(feature = "logging")]
+macro_rules! log_error {
+    ($($arg:tt)*) => { log::error!($($arg)*); };
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_error {
+    ($($arg:tt)*) => { eprintln!($($arg)*); };
+}
+
 /// Solver mode configuration.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
@@ -241,10 +274,8 @@ pub fn solve_with_subgames(
             // Get flop cards
             let flop = game.card_config().flop;
 
-            if config.print_progress {
-                println!("Computing card abstraction ({} x {} buckets)...",
-                    config.turn_buckets, config.river_buckets);
-            }
+            log_info!("Computing card abstraction ({} x {} buckets)...",
+                config.turn_buckets, config.river_buckets);
 
             // Compute abstraction
             let abstraction_config =
@@ -255,9 +286,7 @@ pub fn solve_with_subgames(
             #[cfg(not(feature = "rayon"))]
             let abstraction = AbstractionMapping::compute(&flop, &abstraction_config);
 
-            if config.print_progress {
-                println!("Abstraction computed. Solving blueprint...");
-            }
+            log_info!("Abstraction computed. Solving blueprint...");
 
             // Solve the game (this is still full precision for now)
             // In a real implementation, we would use the abstraction to reduce the game tree
@@ -300,9 +329,7 @@ pub fn solve_with_subgames(
 
             // Solve subgames if in Subgame mode
             if config.mode == SolverMode::Subgame {
-                if config.print_progress {
-                    println!("Blueprint solved. Now solving turn subgames with real DCFR...");
-                }
+                log_info!("Blueprint solved. Now solving turn subgames with real DCFR...");
 
                 // Configure subgame solving
                 let subgame_config = SubgameConfig {
@@ -333,10 +360,8 @@ pub fn solve_with_subgames(
                     best_subgame_exploitability = avg_exploitability;
                 }
 
-                if config.print_progress {
-                    println!("Solved {} subgames, avg exploitability: {:.4}%",
-                        subgames_solved, best_subgame_exploitability * 100.0);
-                }
+                log_info!("Solved {} subgames, avg exploitability: {:.4}%",
+                    subgames_solved, best_subgame_exploitability * 100.0);
             }
 
             Ok(IntegrationSolveResult {
@@ -396,7 +421,7 @@ pub fn solve_single_subgame(
     let action_tree = match ActionTree::new(tree_config) {
         Ok(tree) => tree,
         Err(e) => {
-            eprintln!("ERROR: Failed to create action tree for turn {}: {}", info.turn, e);
+            log_error!("Failed to create action tree for turn {}: {}", info.turn, e);
             return SubgameSolveResult::failure(&format!("Failed to create action tree: {}", e));
         }
     };
@@ -405,7 +430,7 @@ pub fn solve_single_subgame(
     let mut subgame = match PostFlopGame::with_config(card_config, action_tree) {
         Ok(game) => game,
         Err(e) => {
-            eprintln!("ERROR: Failed to create subgame for turn {}: {}", info.turn, e);
+            log_error!("Failed to create subgame for turn {}: {}", info.turn, e);
             return SubgameSolveResult::failure(&format!("Failed to create subgame: {}", e));
         }
     };
@@ -442,7 +467,7 @@ pub fn solve_turn_subgames_real(
     original_game: &PostFlopGame,
     flop: &[u8; 3],
     config: &SubgameConfig,
-    print_progress: bool,
+    _print_progress: bool, // Deprecated: logging now controlled by `logging` feature
 ) -> (Vec<SubgameSolveResult>, u32) {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
@@ -475,10 +500,10 @@ pub fn solve_turn_subgames_real(
             let result = solve_single_subgame(&info, config, original_game);
 
             let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
-            if print_progress && done % 10 == 0 {
+            if done % 10 == 0 {
                 let elapsed = start.elapsed().as_secs_f64();
-                println!(
-                    "Progress: {}/{} ({:.1}%) - elapsed: {:.1}s",
+                log_debug!(
+                    "Subgame progress: {}/{} ({:.1}%) - elapsed: {:.1}s",
                     done, total,
                     done as f64 / total as f64 * 100.0,
                     elapsed
@@ -499,7 +524,7 @@ pub fn solve_turn_subgames_real(
     original_game: &PostFlopGame,
     flop: &[u8; 3],
     config: &SubgameConfig,
-    print_progress: bool,
+    _print_progress: bool, // Deprecated: logging now controlled by `logging` feature
 ) -> (Vec<SubgameSolveResult>, u32) {
     use std::time::Instant;
 
@@ -527,10 +552,10 @@ pub fn solve_turn_subgames_real(
         let result = solve_single_subgame(&info, config, original_game);
         results.push(result);
 
-        if print_progress && (i + 1) % 10 == 0 {
+        if (i + 1) % 10 == 0 {
             let elapsed = start.elapsed().as_secs_f64();
-            println!(
-                "Progress: {}/{} ({:.1}%) - elapsed: {:.1}s",
+            log_debug!(
+                "Subgame progress: {}/{} ({:.1}%) - elapsed: {:.1}s",
                 i + 1, total,
                 (i + 1) as f64 / total as f64 * 100.0,
                 elapsed

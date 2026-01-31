@@ -2,11 +2,23 @@ use crate::interface::*;
 use crate::mutex_like::*;
 use crate::sliceop::*;
 use crate::utility::*;
-use std::io::{self, Write};
 use std::mem::MaybeUninit;
 
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
+
+/// Macro for conditional debug logging of solver progress
+#[cfg(feature = "logging")]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {
+        log::debug!($($arg)*);
+    };
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {};
+}
 
 struct DiscountParams {
     alpha_t: f32,
@@ -43,7 +55,7 @@ pub fn solve<T: Game>(
     game: &mut T,
     max_num_iterations: u32,
     target_exploitability: f32,
-    print_progress: bool,
+    _print_progress: bool, // Deprecated: logging now controlled by `logging` feature
 ) -> f32 {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -62,15 +74,17 @@ pub fn solve<T: Game>(
         0.0
     };
 
-    if print_progress {
-        print!("iteration: 0 / {max_num_iterations} ");
-        if starting_pot > 0.0 {
-            let current_percent = exploitability / starting_pot * 100.0;
-            print!("(exploitability = {current_percent:.2}% | target = {target_percent:.2}%)");
-        } else {
-            print!("(exploitability = {exploitability:.4e})");
-        }
-        io::stdout().flush().unwrap();
+    let mut prev_exploitability = exploitability;
+
+    // Log initial state
+    if starting_pot > 0.0 {
+        let current_percent = exploitability / starting_pot * 100.0;
+        log_debug!(
+            "iter {:>4} | exploit {:>8.4}% | target {:>6.2}% | delta {:>+8.4}%",
+            0, current_percent, target_percent, 0.0
+        );
+    } else {
+        log_debug!("iter {:>4} | exploit {:>12.4e} | delta {:>+12.4e}", 0, exploitability, 0.0);
     }
 
     for t in 0..max_num_iterations {
@@ -93,26 +107,44 @@ pub fn solve<T: Game>(
             );
         }
 
-        if (t + 1) % 10 == 0 || t + 1 == max_num_iterations {
-            exploitability = compute_exploitability(game);
-        }
+        // Compute exploitability every iteration for detailed tracking
+        exploitability = compute_exploitability(game);
+        let delta = exploitability - prev_exploitability;
 
-        if print_progress {
-            print!("\riteration: {} / {} ", t + 1, max_num_iterations);
-            if starting_pot > 0.0 {
-                let current_percent = exploitability / starting_pot * 100.0;
-                print!("(exploitability = {current_percent:.2}% | target = {target_percent:.2}%)");
+        // Log progress via debug logging (controlled by logging feature)
+        if starting_pot > 0.0 {
+            let current_percent = exploitability / starting_pot * 100.0;
+            let delta_percent = delta / starting_pot * 100.0;
+            // Mark spikes when exploitability increases
+            if delta > 0.0 && t > 0 {
+                log_debug!(
+                    "iter {:>4} | exploit {:>8.4}% | target {:>6.2}% | delta {:>+8.4}% ⚠️ SPIKE",
+                    t + 1, current_percent, target_percent, delta_percent
+                );
             } else {
-                print!("(exploitability = {exploitability:.4e})");
+                log_debug!(
+                    "iter {:>4} | exploit {:>8.4}% | target {:>6.2}% | delta {:>+8.4}%",
+                    t + 1, current_percent, target_percent, delta_percent
+                );
             }
-            io::stdout().flush().unwrap();
+        } else {
+            if delta > 0.0 && t > 0 {
+                log_debug!(
+                    "iter {:>4} | exploit {:>12.4e} | delta {:>+12.4e} ⚠️ SPIKE",
+                    t + 1, exploitability, delta
+                );
+            } else {
+                log_debug!(
+                    "iter {:>4} | exploit {:>12.4e} | delta {:>+12.4e}",
+                    t + 1, exploitability, delta
+                );
+            }
         }
+
+        prev_exploitability = exploitability;
     }
 
-    if print_progress {
-        println!();
-        io::stdout().flush().unwrap();
-    }
+    log_debug!("--- Solver finished ---");
 
     finalize(game);
 

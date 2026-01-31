@@ -37,10 +37,14 @@
   },
 
   "solver": {
-    "mode": "full",
-    "maxIterations": 1000,
+    "mode": "subgame",
+    "maxIterations": 400,
     "targetExploitabilityPercent": 0.3,
-    "useCompression": true
+    "useCompression": true,
+    "subgame": {
+      "blueprintExploitabilityPercent": 2.0,
+      "subgameExploitabilityPercent": 0.3
+    }
   },
 
   "output": {

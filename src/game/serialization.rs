@@ -272,8 +272,8 @@ impl<Context> Decode<Context> for PostFlopGame {
         });
 
         // game tree
-        let total_nodes: u64 = game.num_nodes.iter().map(|&x| x as u64).sum();
-        log_info!("[DECODE] Decoding {} nodes (this may take a while)...", total_nodes);
+        let _total_nodes: u64 = game.num_nodes.iter().map(|&x| x as u64).sum();
+        log_info!("[DECODE] Decoding {} nodes (this may take a while)...", _total_nodes);
         game.node_arena = Decode::decode(decoder)?;
         log_info!("[DECODE] Node arena decoded: {} nodes", game.node_arena.len());
 

@@ -700,6 +700,15 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 }
 
 fn main() {
+    // Initialize logger with debug level as default
+    #[cfg(feature = "logging")]
+    {
+        use std::io::Write;
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .format(|buf, record| writeln!(buf, "[{}] {}", record.level(), record.args()))
+            .init();
+    }
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
