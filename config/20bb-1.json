@@ -38,11 +38,11 @@
   "solver": {
     "maxIterations": 1000,
     "targetExploitabilityPercent": 0.5,
-    "useCompression": false
+    "useCompression": true
   },
   "output": {
     "filename": "20bb.flop",
-    "compressionLevel": 3,
+    "compressionLevel": 10,
     "memo": "Td9d6h flop, pot=55, stack=180"
   }
 }
