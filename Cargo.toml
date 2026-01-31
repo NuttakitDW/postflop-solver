@@ -16,6 +16,10 @@ rayon = { version = "1.8.0", optional = true }
 regex = "1.9.6"
 zstd = { version = "0.12.4", optional = true, default-features = false }
 tikv-jemallocator = { version = "0.5", optional = true }
+# Subgame solving dependencies
+zip = { version = "0.6", optional = true, default-features = false, features = ["deflate", "zstd"] }
+lru = { version = "0.12", optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -28,6 +32,9 @@ custom-alloc = []
 logging = ["dep:log"]
 rayon = ["dep:rayon", "zstd?/zstdmt"]
 jemalloc = ["dep:tikv-jemallocator"]
+# Subgame solving features
+subgame = ["bincode"]
+subgame-archive = ["subgame", "dep:zip", "dep:lru", "dep:serde_json"]
 
 [profile.release]
 lto = true
