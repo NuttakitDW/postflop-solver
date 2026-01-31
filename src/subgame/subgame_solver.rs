@@ -20,11 +20,15 @@ use bincode::{Decode, Encode};
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 pub struct SubgameConfig {
-    /// Number of DCFR iterations for the subgame.
+    /// Max iterations for the subgame (safety limit).
     pub iterations: u32,
 
-    /// Target exploitability (as fraction of pot).
-    pub target_exploitability: f32,
+    /// Delta threshold for convergence (fraction of pot).
+    /// Solver stops when |delta| < threshold for `delta_patience` iterations.
+    pub delta_threshold: f32,
+
+    /// Number of consecutive iterations where |delta| < threshold before stopping.
+    pub delta_patience: u32,
 
     /// Enable value compression (i16 storage).
     pub enable_compression: bool,
@@ -44,7 +48,8 @@ impl Default for SubgameConfig {
     fn default() -> Self {
         Self {
             iterations: 500,
-            target_exploitability: 0.001, // 0.1% of pot
+            delta_threshold: 0.001, // 0.1% of pot
+            delta_patience: 3,
             enable_compression: true,
             use_safe_solving: true,
             safety_margin: 0.02,
@@ -58,7 +63,8 @@ impl SubgameConfig {
     pub fn fast() -> Self {
         Self {
             iterations: 100,
-            target_exploitability: 0.01, // 1% of pot
+            delta_threshold: 0.01, // 1% of pot
+            delta_patience: 3,
             enable_compression: false,
             use_safe_solving: false,
             safety_margin: 0.0,
@@ -70,7 +76,8 @@ impl SubgameConfig {
     pub fn high_precision() -> Self {
         Self {
             iterations: 1000,
-            target_exploitability: 0.0005, // 0.05% of pot
+            delta_threshold: 0.0005, // 0.05% of pot
+            delta_patience: 3,
             enable_compression: true,
             use_safe_solving: true,
             safety_margin: 0.01,
@@ -614,9 +621,9 @@ pub fn mock_solve(_info: &SubgameInfo, config: &SubgameConfig) -> SubgameSolveRe
     // Simulate some work
     std::thread::sleep(std::time::Duration::from_micros(100));
 
-    // Return a successful result with exploitability based on config
+    // Return a successful result with exploitability based on delta threshold
     SubgameSolveResult::success(
-        config.target_exploitability * 0.8, // Slightly better than target
+        config.delta_threshold * 0.8, // Slightly better than threshold
         config.iterations,
     )
 }

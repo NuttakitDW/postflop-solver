@@ -47,16 +47,49 @@ impl DiscountParams {
     }
 }
 
-/// Performs Discounted CFR algorithm until the given number of iterations or exploitability is
-/// satisfied.
+/// Configuration for solver convergence criteria.
 ///
-/// This method returns the exploitability of the obtained strategy.
-pub fn solve<T: Game>(
-    game: &mut T,
-    max_num_iterations: u32,
-    target_exploitability: f32,
-    _print_progress: bool, // Deprecated: logging now controlled by `logging` feature
-) -> f32 {
+/// Uses delta-based convergence: solver stops when the change in exploitability
+/// falls below a threshold for a number of consecutive iterations.
+#[derive(Clone, Debug)]
+pub struct ConvergenceConfig {
+    /// Maximum number of iterations (safety limit).
+    pub max_iterations: u32,
+    /// Delta threshold (absolute value). Solver stops when |delta| < threshold for `patience` iterations.
+    pub delta_threshold: f32,
+    /// Number of consecutive iterations where |delta| < threshold before stopping.
+    pub patience: u32,
+}
+
+impl Default for ConvergenceConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 1000,
+            delta_threshold: 0.0, // 0 = run until max_iterations
+            patience: 3,
+        }
+    }
+}
+
+impl ConvergenceConfig {
+    /// Creates a new convergence config.
+    pub fn new(max_iterations: u32, delta_threshold: f32, patience: u32) -> Self {
+        Self {
+            max_iterations,
+            delta_threshold,
+            patience,
+        }
+    }
+}
+
+/// Performs Discounted CFR algorithm with delta-based convergence.
+///
+/// Stops when either:
+/// - |delta| < delta_threshold for `patience` consecutive iterations (converged)
+/// - max_iterations reached
+///
+/// Returns the final exploitability.
+pub fn solve_with_config<T: Game>(game: &mut T, config: &ConvergenceConfig) -> f32 {
     if game.is_solved() {
         panic!("Game is already solved");
     }
@@ -68,30 +101,24 @@ pub fn solve<T: Game>(
     let mut root = game.root();
     let mut exploitability = compute_exploitability(game);
     let starting_pot = game.starting_pot() as f32;
-    let target_percent = if starting_pot > 0.0 {
-        target_exploitability / starting_pot * 100.0
-    } else {
-        0.0
-    };
+    let delta_threshold_abs = config.delta_threshold * starting_pot;
+    let delta_threshold_percent = config.delta_threshold * 100.0;
 
     let mut prev_exploitability = exploitability;
+    let mut low_delta_count: u32 = 0;
 
     // Log initial state
     if starting_pot > 0.0 {
         let current_percent = exploitability / starting_pot * 100.0;
         log_debug!(
-            "iter {:>4} | exploit {:>8.4}% | target {:>6.2}% | delta {:>+8.4}%",
-            0, current_percent, target_percent, 0.0
+            "iter {:>4} | exploit {:>8.4}% | delta {:>+8.4}%",
+            0, current_percent, 0.0
         );
     } else {
         log_debug!("iter {:>4} | exploit {:>12.4e} | delta {:>+12.4e}", 0, exploitability, 0.0);
     }
 
-    for t in 0..max_num_iterations {
-        if exploitability <= target_exploitability {
-            break;
-        }
-
+    for t in 0..config.max_iterations {
         let params = DiscountParams::new(t);
 
         // alternating updates
@@ -110,21 +137,20 @@ pub fn solve<T: Game>(
         // Compute exploitability every iteration for detailed tracking
         exploitability = compute_exploitability(game);
         let delta = exploitability - prev_exploitability;
+        let delta_percent = if starting_pot > 0.0 { delta / starting_pot * 100.0 } else { 0.0 };
 
-        // Log progress via debug logging (controlled by logging feature)
+        // Log progress
         if starting_pot > 0.0 {
             let current_percent = exploitability / starting_pot * 100.0;
-            let delta_percent = delta / starting_pot * 100.0;
-            // Mark spikes when exploitability increases
             if delta > 0.0 && t > 0 {
                 log_debug!(
-                    "iter {:>4} | exploit {:>8.4}% | target {:>6.2}% | delta {:>+8.4}% ⚠️ SPIKE",
-                    t + 1, current_percent, target_percent, delta_percent
+                    "iter {:>4} | exploit {:>8.4}% | delta {:>+8.4}% ⚠️ SPIKE",
+                    t + 1, current_percent, delta_percent
                 );
             } else {
                 log_debug!(
-                    "iter {:>4} | exploit {:>8.4}% | target {:>6.2}% | delta {:>+8.4}%",
-                    t + 1, current_percent, target_percent, delta_percent
+                    "iter {:>4} | exploit {:>8.4}% | delta {:>+8.4}%",
+                    t + 1, current_percent, delta_percent
                 );
             }
         } else {
@@ -141,6 +167,22 @@ pub fn solve<T: Game>(
             }
         }
 
+        // Check delta-based convergence
+        if config.delta_threshold > 0.0 {
+            if delta.abs() < delta_threshold_abs {
+                low_delta_count += 1;
+                if low_delta_count >= config.patience {
+                    log_debug!(
+                        "Converged: |delta| ({:.4}%) < threshold ({:.4}%) for {} iterations",
+                        delta_percent.abs(), delta_threshold_percent, config.patience
+                    );
+                    break;
+                }
+            } else {
+                low_delta_count = 0;
+            }
+        }
+
         prev_exploitability = exploitability;
     }
 
@@ -149,6 +191,27 @@ pub fn solve<T: Game>(
     finalize(game);
 
     exploitability
+}
+
+/// Performs Discounted CFR algorithm for a fixed number of iterations.
+///
+/// This is a legacy function for backwards compatibility.
+/// Prefer using `solve_with_config` for delta-based convergence.
+///
+/// This method returns the exploitability of the obtained strategy.
+pub fn solve<T: Game>(
+    game: &mut T,
+    max_num_iterations: u32,
+    _target_exploitability: f32, // Deprecated: use solve_with_config with delta threshold
+    _print_progress: bool, // Deprecated: logging now controlled by `logging` feature
+) -> f32 {
+    // Run for fixed iterations (no early stopping)
+    let config = ConvergenceConfig {
+        max_iterations: max_num_iterations,
+        delta_threshold: 0.0, // disabled
+        patience: 3,
+    };
+    solve_with_config(game, &config)
 }
 
 /// Proceeds Discounted CFR algorithm for one iteration.

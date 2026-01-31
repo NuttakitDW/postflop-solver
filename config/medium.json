@@ -38,12 +38,13 @@
 
   "solver": {
     "mode": "subgame",
-    "maxIterations": 400,
-    "targetExploitabilityPercent": 0.3,
+    "maxIterations": 1000,
+    "deltaThresholdPercent": 0.1,
+    "deltaPatience": 10,
     "useCompression": true,
     "subgame": {
-      "blueprintExploitabilityPercent": 2.0,
-      "subgameExploitabilityPercent": 0.3
+      "blueprintIterations": 500,
+      "subgameIterations": 1000
     }
   },
 

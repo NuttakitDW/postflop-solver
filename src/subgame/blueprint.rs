@@ -23,11 +23,11 @@ pub struct BlueprintConfig {
     /// Card abstraction configuration.
     pub abstraction: AbstractionConfig,
 
-    /// Number of DCFR iterations for blueprint.
+    /// Max iterations for blueprint (safety limit).
     pub iterations: u32,
 
-    /// Target exploitability (as fraction of pot).
-    pub target_exploitability: f32,
+    /// Delta threshold for convergence (fraction of pot).
+    pub delta_threshold: f32,
 
     /// Whether to print progress during generation.
     pub print_progress: bool,
@@ -38,7 +38,7 @@ impl Default for BlueprintConfig {
         Self {
             abstraction: AbstractionConfig::standard(),
             iterations: 1000,
-            target_exploitability: 0.005, // 0.5% of pot
+            delta_threshold: 0.001, // 0.1% of pot
             print_progress: true,
         }
     }
@@ -50,12 +50,12 @@ impl BlueprintConfig {
         turn_buckets: u8,
         river_buckets: u8,
         iterations: u32,
-        target_exploitability: f32,
+        delta_threshold: f32,
     ) -> Self {
         Self {
             abstraction: AbstractionConfig::new(turn_buckets, river_buckets),
             iterations,
-            target_exploitability,
+            delta_threshold,
             print_progress: true,
         }
     }
@@ -65,7 +65,7 @@ impl BlueprintConfig {
         Self {
             abstraction: AbstractionConfig::new(5, 5),
             iterations: 100,
-            target_exploitability: 0.02, // 2% of pot
+            delta_threshold: 0.01, // 1% of pot
             print_progress: false,
         }
     }

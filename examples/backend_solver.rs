@@ -121,18 +121,12 @@ struct SubgameSettings {
     /// Number of river buckets for card abstraction
     #[serde(default = "default_river_buckets")]
     river_buckets: u8,
-    /// Number of iterations for blueprint solving
+    /// Max iterations for blueprint solving (safety limit)
     #[serde(default = "default_blueprint_iterations")]
     blueprint_iterations: u32,
-    /// Target exploitability for blueprint (percent of pot)
-    #[serde(default = "default_blueprint_exploitability")]
-    blueprint_exploitability_percent: f32,
-    /// Number of iterations for subgame solving
+    /// Max iterations for subgame solving (safety limit)
     #[serde(default = "default_subgame_iterations")]
     subgame_iterations: u32,
-    /// Target exploitability for subgames (percent of pot)
-    #[serde(default = "default_subgame_exploitability")]
-    subgame_exploitability_percent: f32,
     /// Whether to use safe subgame solving
     #[serde(default)]
     safe_solving: bool,
@@ -141,9 +135,7 @@ struct SubgameSettings {
 fn default_turn_buckets() -> u8 { 10 }
 fn default_river_buckets() -> u8 { 10 }
 fn default_blueprint_iterations() -> u32 { 500 }
-fn default_blueprint_exploitability() -> f32 { 2.0 }
 fn default_subgame_iterations() -> u32 { 1000 }
-fn default_subgame_exploitability() -> f32 { 0.5 }
 
 impl Default for SubgameSettings {
     fn default() -> Self {
@@ -151,9 +143,7 @@ impl Default for SubgameSettings {
             turn_buckets: default_turn_buckets(),
             river_buckets: default_river_buckets(),
             blueprint_iterations: default_blueprint_iterations(),
-            blueprint_exploitability_percent: default_blueprint_exploitability(),
             subgame_iterations: default_subgame_iterations(),
-            subgame_exploitability_percent: default_subgame_exploitability(),
             safe_solving: false,
         }
     }
@@ -163,10 +153,16 @@ impl Default for SubgameSettings {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SolverSettings {
+    /// Max iterations (safety limit).
     #[serde(default = "default_max_iterations")]
     max_iterations: u32,
-    #[serde(default = "default_target_exploitability")]
-    target_exploitability_percent: f32,
+    /// Delta threshold for convergence (percent of pot).
+    /// Solver stops when |delta| < threshold for `deltaPatience` iterations.
+    #[serde(default = "default_delta_threshold")]
+    delta_threshold_percent: f32,
+    /// Number of consecutive iterations where |delta| < threshold before stopping.
+    #[serde(default = "default_delta_patience")]
+    delta_patience: u32,
     #[serde(default)]
     use_compression: bool,
     /// Solver mode: "full", "blueprint", or "subgame"
@@ -190,7 +186,8 @@ struct SolverSettings {
 }
 
 fn default_max_iterations() -> u32 { 1000 }
-fn default_target_exploitability() -> f32 { 0.5 }
+fn default_delta_threshold() -> f32 { 0.1 } // 0.1% of pot
+fn default_delta_patience() -> u32 { 3 }
 fn default_sample_chance() -> bool { true }
 fn default_use_ci() -> bool { true }
 fn default_target_ci() -> f32 { 5.0 }
@@ -283,16 +280,15 @@ fn generate_template() -> SolverConfig {
         },
         solver: SolverSettings {
             max_iterations: 1000,
-            target_exploitability_percent: 0.5,
+            delta_threshold_percent: 0.1, // 0.1% of pot
+            delta_patience: 3,
             use_compression: false,
             mode: SolverModeConfig::Full,
             subgame: Some(SubgameSettings {
                 turn_buckets: 10,
                 river_buckets: 10,
                 blueprint_iterations: 500,
-                blueprint_exploitability_percent: 2.0,
                 subgame_iterations: 1000,
-                subgame_exploitability_percent: 0.5,
                 safe_solving: false,
             }),
             seed: None,
@@ -559,15 +555,18 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let (exploitability, subgames_solved, blueprint_exploitability) = match config.solver.mode {
         SolverModeConfig::Full => {
             // Standard full-precision solving
-            let target_exploitability =
-                game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
+            use postflop_solver::ConvergenceConfig;
 
-            let exploitability = solve(
-                &mut game,
+            // delta_threshold is fraction of pot (e.g., 0.001 for 0.1%)
+            let delta_threshold = config.solver.delta_threshold_percent / 100.0;
+
+            let conv_config = ConvergenceConfig::new(
                 config.solver.max_iterations,
-                target_exploitability,
-                true,
+                delta_threshold,
+                config.solver.delta_patience,
             );
+
+            let exploitability = solve_with_config(&mut game, &conv_config);
             (exploitability, None, None)
         }
 
@@ -592,9 +591,9 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
                     turn_buckets: subgame_settings.turn_buckets,
                     river_buckets: subgame_settings.river_buckets,
                     blueprint_iterations: subgame_settings.blueprint_iterations,
-                    blueprint_target_exploitability: subgame_settings.blueprint_exploitability_percent / 100.0,
                     subgame_iterations: subgame_settings.subgame_iterations,
-                    subgame_target_exploitability: subgame_settings.subgame_exploitability_percent / 100.0,
+                    delta_threshold: config.solver.delta_threshold_percent / 100.0,
+                    delta_patience: config.solver.delta_patience,
                     safe_solving: subgame_settings.safe_solving,
                     parallel: true,
                     print_progress: true,
@@ -620,16 +619,19 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
             #[cfg(not(feature = "subgame"))]
             {
                 // Fallback to full solving if subgame feature is not enabled
-                println!("Warning: subgame feature not enabled, falling back to full solving");
-                let target_exploitability =
-                    game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
+                use postflop_solver::ConvergenceConfig;
 
-                let exploitability = solve(
-                    &mut game,
+                println!("Warning: subgame feature not enabled, falling back to full solving");
+                // delta_threshold is fraction of pot (e.g., 0.001 for 0.1%)
+                let delta_threshold = config.solver.delta_threshold_percent / 100.0;
+
+                let conv_config = ConvergenceConfig::new(
                     config.solver.max_iterations,
-                    target_exploitability,
-                    true,
+                    delta_threshold,
+                    config.solver.delta_patience,
                 );
+
+                let exploitability = solve_with_config(&mut game, &conv_config);
                 (exploitability, None, None)
             }
         }
@@ -756,7 +758,8 @@ fn main() {
     println!("Starting pot: {}", config.tree.starting_pot);
     println!("Effective stack: {}", config.tree.effective_stack);
     println!("Max iterations: {}", config.solver.max_iterations);
-    println!("Target exploitability: {}% of pot", config.solver.target_exploitability_percent);
+    println!("Delta threshold: {}% of pot (patience: {})",
+        config.solver.delta_threshold_percent, config.solver.delta_patience);
     println!("Solver mode: {:?}", config.solver.mode);
     if config.solver.mode != SolverModeConfig::Full {
         if let Some(ref subgame) = config.solver.subgame {

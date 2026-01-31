@@ -10,7 +10,7 @@ use crate::action_tree::{ActionTree, BoardState, TreeConfig};
 use crate::card::CardConfig;
 use crate::game::PostFlopGame;
 use crate::interface::Game;
-use crate::solver::solve;
+use crate::solver::{solve_with_config, ConvergenceConfig};
 use crate::subgame::abstraction::{AbstractionConfig, AbstractionMapping};
 use crate::subgame::blueprint::{Blueprint, BlueprintConfig};
 use crate::subgame::boundary::{BoundaryData, BoundaryStore};
@@ -83,17 +83,18 @@ pub struct SubgameSolverConfig {
     /// Number of river buckets for abstraction.
     pub river_buckets: u8,
 
-    /// Number of iterations for blueprint solving.
+    /// Max iterations for blueprint solving (safety limit).
     pub blueprint_iterations: u32,
 
-    /// Target exploitability for blueprint (fraction of pot).
-    pub blueprint_target_exploitability: f32,
-
-    /// Number of iterations for subgame solving.
+    /// Max iterations for subgame solving (safety limit).
     pub subgame_iterations: u32,
 
-    /// Target exploitability for subgames (fraction of pot).
-    pub subgame_target_exploitability: f32,
+    /// Delta threshold for convergence (fraction of pot).
+    /// Solver stops when |delta| < threshold for `delta_patience` iterations.
+    pub delta_threshold: f32,
+
+    /// Number of consecutive iterations where |delta| < threshold before stopping.
+    pub delta_patience: u32,
 
     /// Whether to use safe subgame solving.
     pub safe_solving: bool,
@@ -112,9 +113,9 @@ impl Default for SubgameSolverConfig {
             turn_buckets: 10,
             river_buckets: 10,
             blueprint_iterations: 500,
-            blueprint_target_exploitability: 0.02, // 2% of pot
             subgame_iterations: 1000,
-            subgame_target_exploitability: 0.005, // 0.5% of pot
+            delta_threshold: 0.001, // 0.1% of pot
+            delta_patience: 3,
             safe_solving: true,
             parallel: true,
             print_progress: true,
@@ -130,9 +131,9 @@ impl SubgameSolverConfig {
             turn_buckets: 5,
             river_buckets: 5,
             blueprint_iterations: 100,
-            blueprint_target_exploitability: 0.05,
             subgame_iterations: 200,
-            subgame_target_exploitability: 0.01,
+            delta_threshold: 0.01, // 1% of pot
+            delta_patience: 3,
             safe_solving: false,
             parallel: true,
             print_progress: false,
@@ -146,9 +147,9 @@ impl SubgameSolverConfig {
             turn_buckets: 15,
             river_buckets: 15,
             blueprint_iterations: 1000,
-            blueprint_target_exploitability: 0.01,
             subgame_iterations: 2000,
-            subgame_target_exploitability: 0.002,
+            delta_threshold: 0.0005, // 0.05% of pot
+            delta_patience: 3,
             safe_solving: true,
             parallel: true,
             print_progress: true,
@@ -253,13 +254,12 @@ pub fn solve_with_subgames(
     match config.mode {
         SolverMode::Full => {
             // Standard full-precision solving
-            let target = game.tree_config().starting_pot as f32 * config.blueprint_target_exploitability;
-            let exploitability = solve(
-                game,
+            let conv_config = ConvergenceConfig::new(
                 config.blueprint_iterations,
-                target,
-                config.print_progress,
+                config.delta_threshold, // fraction of pot
+                config.delta_patience,
             );
+            let exploitability = solve_with_config(game, &conv_config);
 
             Ok(IntegrationSolveResult {
                 blueprint: None,
@@ -290,13 +290,12 @@ pub fn solve_with_subgames(
 
             // Solve the game (this is still full precision for now)
             // In a real implementation, we would use the abstraction to reduce the game tree
-            let target = game.tree_config().starting_pot as f32 * config.blueprint_target_exploitability;
-            let exploitability = solve(
-                game,
+            let conv_config = ConvergenceConfig::new(
                 config.blueprint_iterations,
-                target,
-                config.print_progress,
+                config.delta_threshold, // fraction of pot
+                config.delta_patience,
             );
+            let exploitability = solve_with_config(game, &conv_config);
 
             // Cache weights for boundary extraction
             game.cache_normalized_weights();
@@ -310,7 +309,7 @@ pub fn solve_with_subgames(
             let blueprint_config = BlueprintConfig {
                 abstraction: abstraction_config,
                 iterations: config.blueprint_iterations,
-                target_exploitability: config.blueprint_target_exploitability,
+                delta_threshold: config.delta_threshold,
                 print_progress: config.print_progress,
             };
 
@@ -334,7 +333,8 @@ pub fn solve_with_subgames(
                 // Configure subgame solving
                 let subgame_config = SubgameConfig {
                     iterations: config.subgame_iterations,
-                    target_exploitability: config.subgame_target_exploitability,
+                    delta_threshold: config.delta_threshold,
+                    delta_patience: config.delta_patience,
                     use_safe_solving: config.safe_solving,
                     print_progress: false, // Don't print per-subgame progress
                     ..Default::default()
@@ -438,16 +438,13 @@ pub fn solve_single_subgame(
     // Allocate memory
     subgame.allocate_memory(config.enable_compression);
 
-    // Calculate target exploitability
-    let target = subgame.tree_config().starting_pot as f32 * config.target_exploitability;
-
     // Solve the subgame
-    let exploitability = solve(
-        &mut subgame,
+    let conv_config = ConvergenceConfig::new(
         config.iterations,
-        target,
-        config.print_progress,
+        config.delta_threshold, // fraction of pot
+        config.delta_patience,
     );
+    let exploitability = solve_with_config(&mut subgame, &conv_config);
 
     let exploitability_fraction = exploitability / subgame.tree_config().starting_pot as f32;
     let elapsed = start.elapsed();
@@ -573,8 +570,8 @@ pub struct RealtimeSubgameOptions {
     /// Maximum iterations for real-time solving.
     pub max_iterations: u32,
 
-    /// Target exploitability for real-time subgames.
-    pub target_exploitability: f32,
+    /// Delta threshold for convergence (fraction of pot).
+    pub delta_threshold: f32,
 
     /// Timeout in milliseconds.
     pub timeout_ms: u32,
@@ -587,7 +584,7 @@ impl Default for RealtimeSubgameOptions {
     fn default() -> Self {
         Self {
             max_iterations: 500,
-            target_exploitability: 0.01,
+            delta_threshold: 0.01, // 1% of pot
             timeout_ms: 1000,
             warm_start: true,
         }
