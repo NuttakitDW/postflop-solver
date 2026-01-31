@@ -32,6 +32,7 @@ mod abstraction;
 mod archive;
 mod blueprint;
 mod boundary;
+mod integration;
 mod stitching;
 mod subgame_solver;
 
@@ -39,6 +40,7 @@ pub use abstraction::*;
 pub use archive::*;
 pub use blueprint::*;
 pub use boundary::*;
+pub use integration::*;
 pub use stitching::*;
 pub use subgame_solver::*;
 

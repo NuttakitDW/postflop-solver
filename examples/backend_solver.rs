@@ -98,6 +98,67 @@ fn default_force_allin() -> f64 { 20.0 }
 fn default_merging() -> f64 { 10.0 }
 fn default_max_raises() -> i32 { 0 }
 
+/// Solver mode enum
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum SolverModeConfig {
+    /// Full precision solving (standard DCFR)
+    #[default]
+    Full,
+    /// Blueprint mode: solve with card abstraction
+    Blueprint,
+    /// Subgame mode: solve blueprint + refine subgames
+    Subgame,
+}
+
+/// Subgame-specific settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubgameSettings {
+    /// Number of turn buckets for card abstraction
+    #[serde(default = "default_turn_buckets")]
+    turn_buckets: u8,
+    /// Number of river buckets for card abstraction
+    #[serde(default = "default_river_buckets")]
+    river_buckets: u8,
+    /// Number of iterations for blueprint solving
+    #[serde(default = "default_blueprint_iterations")]
+    blueprint_iterations: u32,
+    /// Target exploitability for blueprint (percent of pot)
+    #[serde(default = "default_blueprint_exploitability")]
+    blueprint_exploitability_percent: f32,
+    /// Number of iterations for subgame solving
+    #[serde(default = "default_subgame_iterations")]
+    subgame_iterations: u32,
+    /// Target exploitability for subgames (percent of pot)
+    #[serde(default = "default_subgame_exploitability")]
+    subgame_exploitability_percent: f32,
+    /// Whether to use safe subgame solving
+    #[serde(default)]
+    safe_solving: bool,
+}
+
+fn default_turn_buckets() -> u8 { 10 }
+fn default_river_buckets() -> u8 { 10 }
+fn default_blueprint_iterations() -> u32 { 500 }
+fn default_blueprint_exploitability() -> f32 { 2.0 }
+fn default_subgame_iterations() -> u32 { 1000 }
+fn default_subgame_exploitability() -> f32 { 0.5 }
+
+impl Default for SubgameSettings {
+    fn default() -> Self {
+        Self {
+            turn_buckets: default_turn_buckets(),
+            river_buckets: default_river_buckets(),
+            blueprint_iterations: default_blueprint_iterations(),
+            blueprint_exploitability_percent: default_blueprint_exploitability(),
+            subgame_iterations: default_subgame_iterations(),
+            subgame_exploitability_percent: default_subgame_exploitability(),
+            safe_solving: false,
+        }
+    }
+}
+
 /// Solver settings
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,10 +169,31 @@ struct SolverSettings {
     target_exploitability_percent: f32,
     #[serde(default)]
     use_compression: bool,
+    /// Solver mode: "full", "blueprint", or "subgame"
+    #[serde(default)]
+    mode: SolverModeConfig,
+    /// Subgame-specific settings (only used when mode is "blueprint" or "subgame")
+    #[serde(default)]
+    subgame: Option<SubgameSettings>,
+    /// Random seed for reproducibility
+    #[serde(default)]
+    seed: Option<u64>,
+    /// Whether to sample chance nodes
+    #[serde(default = "default_sample_chance")]
+    sample_chance: bool,
+    /// Whether to use confidence interval for convergence
+    #[serde(default = "default_use_ci")]
+    use_ci: bool,
+    /// Target confidence interval
+    #[serde(default = "default_target_ci")]
+    target_ci: f32,
 }
 
 fn default_max_iterations() -> u32 { 1000 }
 fn default_target_exploitability() -> f32 { 0.5 }
+fn default_sample_chance() -> bool { true }
+fn default_use_ci() -> bool { true }
+fn default_target_ci() -> f32 { 5.0 }
 
 /// Output settings
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,6 +232,12 @@ struct SolverResult {
     iterations_used: u32,
     oop_hands: usize,
     ip_hands: usize,
+    /// Solver mode used
+    mode: String,
+    /// Number of subgames solved (if subgame mode)
+    subgames_solved: Option<u32>,
+    /// Blueprint exploitability (if subgame mode)
+    blueprint_exploitability: Option<f32>,
     error: Option<String>,
 }
 
@@ -197,6 +285,20 @@ fn generate_template() -> SolverConfig {
             max_iterations: 1000,
             target_exploitability_percent: 0.5,
             use_compression: false,
+            mode: SolverModeConfig::Full,
+            subgame: Some(SubgameSettings {
+                turn_buckets: 10,
+                river_buckets: 10,
+                blueprint_iterations: 500,
+                blueprint_exploitability_percent: 2.0,
+                subgame_iterations: 1000,
+                subgame_exploitability_percent: 0.5,
+                safe_solving: false,
+            }),
+            seed: None,
+            sample_chance: true,
+            use_ci: true,
+            target_ci: 5.0,
         },
         output: OutputSettings {
             filename: "solution.flop".to_string(),
@@ -249,6 +351,9 @@ fn create_error_result(error: String) -> SolverResult {
         iterations_used: 0,
         oop_hands: 0,
         ip_hands: 0,
+        mode: "full".to_string(),
+        subgames_solved: None,
+        blueprint_exploitability: None,
         error: Some(error),
     }
 }
@@ -443,31 +548,114 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     // Allocate memory
     game.allocate_memory(config.solver.use_compression);
 
-    // Calculate target exploitability
-    let target_exploitability =
-        game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
-
-    // Solve
+    // Solve based on mode
     let solve_start = Instant::now();
-    let exploitability = solve(
-        &mut game,
-        config.solver.max_iterations,
-        target_exploitability,
-        true, // Print progress
-    );
-    let solve_time = solve_start.elapsed();
+    let mode_str = match config.solver.mode {
+        SolverModeConfig::Full => "full",
+        SolverModeConfig::Blueprint => "blueprint",
+        SolverModeConfig::Subgame => "subgame",
+    };
 
+    let (exploitability, subgames_solved, blueprint_exploitability) = match config.solver.mode {
+        SolverModeConfig::Full => {
+            // Standard full-precision solving
+            let target_exploitability =
+                game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
+
+            let exploitability = solve(
+                &mut game,
+                config.solver.max_iterations,
+                target_exploitability,
+                true,
+            );
+            (exploitability, None, None)
+        }
+
+        SolverModeConfig::Blueprint | SolverModeConfig::Subgame => {
+            // Get subgame settings
+            let subgame_settings = config.solver.subgame.as_ref()
+                .cloned()
+                .unwrap_or_default();
+
+            #[cfg(feature = "subgame")]
+            {
+                use postflop_solver::subgame::{
+                    SolverMode, SubgameSolverConfig, solve_with_subgames
+                };
+
+                let subgame_config = SubgameSolverConfig {
+                    mode: match config.solver.mode {
+                        SolverModeConfig::Blueprint => SolverMode::Blueprint,
+                        SolverModeConfig::Subgame => SolverMode::Subgame,
+                        _ => SolverMode::Full,
+                    },
+                    turn_buckets: subgame_settings.turn_buckets,
+                    river_buckets: subgame_settings.river_buckets,
+                    blueprint_iterations: subgame_settings.blueprint_iterations,
+                    blueprint_target_exploitability: subgame_settings.blueprint_exploitability_percent / 100.0,
+                    subgame_iterations: subgame_settings.subgame_iterations,
+                    subgame_target_exploitability: subgame_settings.subgame_exploitability_percent / 100.0,
+                    safe_solving: subgame_settings.safe_solving,
+                    parallel: true,
+                    print_progress: true,
+                };
+
+                match solve_with_subgames(&mut game, &subgame_config) {
+                    Ok(result) => {
+                        let exploitability = result.final_exploitability * game.tree_config().starting_pot as f32;
+                        let subgames = if result.subgames_solved > 0 {
+                            Some(result.subgames_solved)
+                        } else {
+                            None
+                        };
+                        let blueprint_exp = result.blueprint.as_ref().map(|b| b.exploitability * 100.0);
+                        (exploitability, subgames, blueprint_exp)
+                    }
+                    Err(e) => {
+                        return create_error_result(format!("Subgame solving failed: {}", e));
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "subgame"))]
+            {
+                // Fallback to full solving if subgame feature is not enabled
+                println!("Warning: subgame feature not enabled, falling back to full solving");
+                let target_exploitability =
+                    game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
+
+                let exploitability = solve(
+                    &mut game,
+                    config.solver.max_iterations,
+                    target_exploitability,
+                    true,
+                );
+                (exploitability, None, None)
+            }
+        }
+    };
+
+    let solve_time = solve_start.elapsed();
     let exploitability_percent = exploitability / game.tree_config().starting_pot as f32 * 100.0;
 
     // Generate memo
     let memo = config.output.memo.clone().unwrap_or_else(|| {
+        let mode_info = match config.solver.mode {
+            SolverModeConfig::Full => "full".to_string(),
+            SolverModeConfig::Blueprint => format!("blueprint ({}x{} buckets)",
+                config.solver.subgame.as_ref().map_or(10, |s| s.turn_buckets),
+                config.solver.subgame.as_ref().map_or(10, |s| s.river_buckets)),
+            SolverModeConfig::Subgame => format!("subgame ({} solved)",
+                subgames_solved.unwrap_or(0)),
+        };
         format!(
-            "{} {} {}, pot={}, stack={}, exploitability={:.4} ({:.3}%)",
+            "{} {} {}, pot={}, stack={}, mode={}, exploitability={:.4} ({:.3}%)",
             config.board.flop,
             config.board.turn.as_deref().unwrap_or("-"),
             config.board.river.as_deref().unwrap_or("-"),
             config.tree.starting_pot,
             config.tree.effective_stack,
+            mode_info,
             exploitability,
             exploitability_percent
         )
@@ -486,6 +674,9 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
             iterations_used: config.solver.max_iterations,
             oop_hands,
             ip_hands,
+            mode: mode_str.to_string(),
+            subgames_solved,
+            blueprint_exploitability,
             error: Some(format!("Failed to save file: {}", e)),
         };
     }
@@ -501,6 +692,9 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         iterations_used: config.solver.max_iterations,
         oop_hands,
         ip_hands,
+        mode: mode_str.to_string(),
+        subgames_solved,
+        blueprint_exploitability,
         error: None,
     }
 }
@@ -554,6 +748,15 @@ fn main() {
     println!("Effective stack: {}", config.tree.effective_stack);
     println!("Max iterations: {}", config.solver.max_iterations);
     println!("Target exploitability: {}% of pot", config.solver.target_exploitability_percent);
+    println!("Solver mode: {:?}", config.solver.mode);
+    if config.solver.mode != SolverModeConfig::Full {
+        if let Some(ref subgame) = config.solver.subgame {
+            println!("  Turn buckets: {}", subgame.turn_buckets);
+            println!("  River buckets: {}", subgame.river_buckets);
+            println!("  Blueprint iterations: {}", subgame.blueprint_iterations);
+            println!("  Subgame iterations: {}", subgame.subgame_iterations);
+        }
+    }
     println!("Output: {}", config.output.filename);
     println!();
 
@@ -570,10 +773,17 @@ fn main() {
         println!();
         println!("=== Summary ===");
         println!("Output file: {}", result.output_file);
+        println!("Solver mode: {}", result.mode);
         println!("Solve time: {:.2}s", result.solve_time_seconds);
         println!("Total time: {:.2}s", result.total_time_seconds);
         println!("Exploitability: {:.4} ({:.3}% of pot)",
             result.final_exploitability, result.exploitability_percent);
+        if let Some(blueprint_exp) = result.blueprint_exploitability {
+            println!("Blueprint exploitability: {:.3}% of pot", blueprint_exp);
+        }
+        if let Some(subgames) = result.subgames_solved {
+            println!("Subgames solved: {}", subgames);
+        }
         println!("Memory: {:.2} MB", result.memory_mb);
         println!("OOP hands: {}, IP hands: {}", result.oop_hands, result.ip_hands);
     } else {

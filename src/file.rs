@@ -379,6 +379,7 @@ mod tests {
     use crate::action_tree::*;
     use crate::card::*;
     use crate::range::*;
+    use crate::utility::{compute_average, finalize};
 
     #[test]
     #[cfg(feature = "zstd")]
