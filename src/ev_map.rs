@@ -91,7 +91,7 @@ impl EvMap {
         &mut self,
         game: &PostFlopGame,
         node_index: usize,
-        path_hash: u64,
+        _path_hash: u64,  // Unused - we use pot_size as key instead
     ) -> Result<(), String> {
         let node = game.node_arena()[node_index].lock();
 
@@ -101,8 +101,11 @@ impl EvMap {
         if node.is_terminal() {
             // Fold at flop level - this is a flop terminal
             if is_flop_level {
-                let terminal_ev = self.extract_fold_terminal(game, node_index, path_hash)?;
-                self.terminals.insert(path_hash, terminal_ev);
+                // Use pot size as the hash key (must match evaluation.rs compute_path_hash_simple)
+                let pot_size = game.tree_config().starting_pot + 2 * node.amount();
+                let pot_hash = pot_size as u64;
+                let terminal_ev = self.extract_fold_terminal(game, node_index, pot_hash)?;
+                self.terminals.insert(pot_hash, terminal_ev);
             }
             return Ok(());
         }
@@ -111,8 +114,11 @@ impl EvMap {
             // Chance node at flop level = deal turn = flop action is complete
             // This is a flop terminal - extract EVs
             if is_flop_level {
-                let terminal_ev = self.extract_showdown_terminal(game, node_index, path_hash)?;
-                self.terminals.insert(path_hash, terminal_ev);
+                // Use pot size as the hash key (must match evaluation.rs compute_path_hash_simple)
+                let pot_size = game.tree_config().starting_pot + 2 * node.amount();
+                let pot_hash = pot_size as u64;
+                let terminal_ev = self.extract_showdown_terminal(game, node_index, pot_hash)?;
+                self.terminals.insert(pot_hash, terminal_ev);
             }
             // Don't recurse into turn/river - we only care about flop terminals
             return Ok(());
@@ -125,9 +131,8 @@ impl EvMap {
 
         for i in 0..num_actions {
             let child_index = node_index + children_offset + i;
-            // Use FNV-1a style hashing for better distribution
-            let child_hash = path_hash.wrapping_mul(0x100000001b3).wrapping_add(i as u64);
-            self.extract_terminals_recursive(game, child_index, child_hash)?;
+            // Continue recursion (path_hash not used, we use pot_size at terminals)
+            self.extract_terminals_recursive(game, child_index, 0)?;
         }
 
         Ok(())
