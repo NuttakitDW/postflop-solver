@@ -37,7 +37,7 @@
   },
   "solver": {
     "maxIterations": 1000,
-    "targetExploitabilityPercent": 0.5,
+    "targetExploitabilityPercent": 0.3,
     "useCompression": true
   },
   "output": {
