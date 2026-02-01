@@ -681,19 +681,17 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let (mem_uncompressed, _) = game.memory_usage();
     let memory_mb = mem_uncompressed as f64 / 1024.0 / 1024.0;
 
-    // Allocate memory (always full tree - we solve everything then export what we need)
-    game.allocate_memory(config.solver.use_compression);
-
-    // Log export mode
+    // Set flop-only mode BEFORE allocating memory
     if config.solver.export_flop_only {
         if initial_state != BoardState::Flop {
             return create_error_result("Export flop-only requires board to be at flop (no turn/river specified)".to_string());
         }
         println!("Export mode: FLOP ONLY (solve full tree, save only flop strategies)");
-
-        // Enable flop-only solving mode
         game.set_solve_flop_only(true);
     }
+
+    // Allocate memory (always full tree - we solve everything then export what we need)
+    game.allocate_memory(config.solver.use_compression);
 
     // Load EV map for flop-only solving if provided
     if let Some(ref ev_map_path) = config.solver.load_ev_map {
