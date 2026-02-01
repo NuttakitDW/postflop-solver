@@ -138,7 +138,12 @@ impl EvMap {
             let oop_zero_pct = oop_zeros as f64 / oop_total.max(1) as f64;
             let ip_zero_pct = ip_zeros as f64 / ip_total.max(1) as f64;
 
-            if oop_zero_pct > 0.9 {
+            // Detect fold terminals: one player has EV ≈ pot (winner), other has EV ≈ 0 (folder with no chips in)
+            // This is legitimate when folder's amount=0, so their EV for folding is 0
+            let is_oop_fold_terminal = oop_avg.abs() < 0.01 && (ip_avg - terminal.pot_size as f64).abs() < 1.0;
+            let is_ip_fold_terminal = ip_avg.abs() < 0.01 && (oop_avg - terminal.pot_size as f64).abs() < 1.0;
+
+            if oop_zero_pct > 0.9 && !is_oop_fold_terminal {
                 return Err(format!(
                     "VALIDATION FAILED: Terminal pot={} has {}% zero OOP EVs - extraction likely failed!",
                     terminal.pot_size,
@@ -146,12 +151,18 @@ impl EvMap {
                 ));
             }
 
-            if ip_zero_pct > 0.9 {
+            if ip_zero_pct > 0.9 && !is_ip_fold_terminal {
                 return Err(format!(
                     "VALIDATION FAILED: Terminal pot={} has {}% zero IP EVs - extraction likely failed!",
                     terminal.pot_size,
                     (ip_zero_pct * 100.0) as i32
                 ));
+            }
+
+            // Log detected fold terminals
+            if is_oop_fold_terminal || is_ip_fold_terminal {
+                println!("  (Detected as fold terminal - {} folds with amount=0)",
+                    if is_oop_fold_terminal { "OOP" } else { "IP" });
             }
         }
 
