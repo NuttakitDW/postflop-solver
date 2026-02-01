@@ -26,7 +26,7 @@
   },
   "tree": {
     "startingPot": 61,
-    "effectiveStack": 977,
+    "effectiveStack": 477,
     "rakePercent": 0.0,
     "rakeCap": 0.0,
     "donkOption": 0,
@@ -38,7 +38,7 @@
   "solver": {
     "maxIterations": 1000,
     "targetExploitabilityPercent": 0.3,
-    "useCompression": false,
+    "useCompression": true,
     "exportFlopOnly": false,
     "warmStartFrom": null,
     "saveRegretSnapshot": null,

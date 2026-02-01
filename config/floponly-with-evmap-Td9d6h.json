@@ -38,7 +38,7 @@
   "solver": {
     "maxIterations": 500,
     "targetExploitabilityPercent": 0.5,
-    "useCompression": false,
+    "useCompression": true,
     "exportFlopOnly": true,
     "warmStartFrom": null,
     "saveRegretSnapshot": null,
