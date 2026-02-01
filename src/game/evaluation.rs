@@ -604,6 +604,16 @@ impl PostFlopGame {
                         path_hash, player, hand.0, hand.1, current_equity);
                     eprintln!("[EV_MAP DEBUG] Available path_hashes: {:?}",
                         ev_map.terminals.keys().collect::<Vec<_>>());
+                    // Show sample hands in the map for this terminal
+                    if let Some(terminal) = ev_map.terminals.get(&path_hash) {
+                        let data = if player == 0 { &terminal.oop_data } else { &terminal.ip_data };
+                        let sample_hands: Vec<_> = data.keys().take(10).collect();
+                        eprintln!("[EV_MAP DEBUG] Sample hands in map for pot={}: {:?} (total: {})",
+                            path_hash, sample_hands, data.len());
+                        // Check if our hand exists with different key format
+                        eprintln!("[EV_MAP DEBUG] Looking for key ({},{}), reversed: ({},{})",
+                            hand.0, hand.1, hand.1, hand.0);
+                    }
                 }
 
                 // Fallback: use simple equity-based value
