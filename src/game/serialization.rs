@@ -90,7 +90,11 @@ impl PostFlopGame {
 
         let mut num_storage = [0; 4];
 
-        while num_storage.iter().any(|&x| x == 0) {
+        // For flop-only mode, there are no chance nodes at flop level
+        // so we only need to find the action nodes (slots 0-2)
+        let need_chance = self.target_storage_mode != BoardState::Flop;
+
+        while node_index > 0 {
             node_index -= 1;
             let node = self.node_arena[node_index].lock();
             if num_storage[0] == 0 && !node.is_terminal() && !node.is_chance() {
@@ -106,6 +110,13 @@ impl PostFlopGame {
                 let offset = unsafe { node.storage1.offset_from(self.storage_chance.as_ptr()) };
                 let len = num_bytes * node.num_elements as usize;
                 num_storage[3] = offset as usize + len;
+            }
+
+            // Check if we found everything we need
+            let found_action = num_storage[0] != 0;
+            let found_chance = num_storage[3] != 0 || !need_chance;
+            if found_action && found_chance {
+                break;
             }
         }
 
