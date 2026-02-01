@@ -580,7 +580,14 @@ impl PostFlopGame {
             let current_equity = current_equities[i as usize];
 
             // Look up EV from the map with equity-ratio scaling
+            // DEBUG: Track lookup stats (only log once per solve)
+            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            static HITS: AtomicUsize = AtomicUsize::new(0);
+            static MISSES: AtomicUsize = AtomicUsize::new(0);
+
             if let Some(ev) = ev_map.get_ev_with_transfer(path_hash, player, hand, current_equity) {
+                HITS.fetch_add(1, Ordering::Relaxed);
                 // Apply card removal / blocking adjustment
                 // Compute the opponent weight after removing our cards
                 let opponent_weight = cfreach_sum
@@ -590,6 +597,15 @@ impl PostFlopGame {
                 // Scale EV by opponent reach (for CFR weighting)
                 result[i as usize] = (ev as f64 * opponent_weight / self.num_combinations) as f32;
             } else {
+                MISSES.fetch_add(1, Ordering::Relaxed);
+                // Log first few misses to debug
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!("[EV_MAP DEBUG] First miss: path_hash={}, player={}, hand=({},{}), equity={}",
+                        path_hash, player, hand.0, hand.1, current_equity);
+                    eprintln!("[EV_MAP DEBUG] Available path_hashes: {:?}",
+                        ev_map.terminals.keys().collect::<Vec<_>>());
+                }
+
                 // Fallback: use simple equity-based value
                 let opponent_weight = cfreach_sum
                     - cfreach_minus[c1 as usize]
@@ -602,6 +618,15 @@ impl PostFlopGame {
                 let ev = current_equity as f64 * amount_win
                     + (1.0 - current_equity as f64) * amount_lose;
                 result[i as usize] = (ev * opponent_weight) as f32;
+            }
+
+            // Log stats periodically
+            let total = HITS.load(Ordering::Relaxed) + MISSES.load(Ordering::Relaxed);
+            if total > 0 && total % 1000000 == 0 {
+                eprintln!("[EV_MAP STATS] hits={}, misses={}, hit_rate={:.1}%",
+                    HITS.load(Ordering::Relaxed),
+                    MISSES.load(Ordering::Relaxed),
+                    100.0 * HITS.load(Ordering::Relaxed) as f64 / total as f64);
             }
         }
     }
