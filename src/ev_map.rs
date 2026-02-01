@@ -79,8 +79,18 @@ impl EvMap {
         let flop = game.card_config().flop;
         let mut ev_map = Self::new(flop);
 
+        // Debug: Print number of hands and first 5 for each player
+        let oop_hands = game.private_cards(0);
+        let ip_hands = game.private_cards(1);
+        println!("\n=== EV MAP EXTRACTION DEBUG ===");
+        println!("OOP hands: {} total", oop_hands.len());
+        println!("First 5 OOP hands: {:?}", oop_hands.iter().take(5).collect::<Vec<_>>());
+        println!("IP hands: {} total", ip_hands.len());
+        println!("First 5 IP hands: {:?}", ip_hands.iter().take(5).collect::<Vec<_>>());
+        println!("================================\n");
+
         // Traverse tree and find flop-terminal nodes
-        ev_map.extract_terminals_recursive(game, 0, 0)?;
+        ev_map.extract_terminals_recursive(game, 0)?;
 
         println!("Extracted {} flop-terminal EV sets", ev_map.terminals.len());
 
@@ -93,6 +103,10 @@ impl EvMap {
     /// Validate that extracted EVs are reasonable (non-zero, proper magnitudes)
     fn validate_extraction(&self) -> Result<(), String> {
         println!("\n=== EV Map Validation ===");
+        println!("Total terminals: {}", self.terminals.len());
+        if self.terminals.is_empty() {
+            return Err("No terminals extracted! Check if chance nodes exist at flop level.".to_string());
+        }
 
         for (_path_hash, terminal) in &self.terminals {
             let mut oop_zeros = 0;
@@ -171,11 +185,18 @@ impl EvMap {
     }
 
     /// Recursively find flop-terminal nodes and extract EVs
+    ///
+    /// We extract EVs for CHANCE nodes only (where the turn is about to be dealt).
+    /// Fold terminals are handled by standard evaluation logic.
+    ///
+    /// Key format: Compound key from (pot_size, prev_action_type)
+    /// This uniquely identifies chance nodes because:
+    /// - pot_size captures the total betting that occurred
+    /// - prev_action distinguishes check-check from bet-call sequences
     fn extract_terminals_recursive(
         &mut self,
         game: &PostFlopGame,
         node_index: usize,
-        _path_hash: u64,  // Unused - we use pot_size as key instead
     ) -> Result<(), String> {
         let node = game.node_arena()[node_index].lock();
 
@@ -183,26 +204,20 @@ impl EvMap {
         let is_flop_level = node.turn() == crate::card::NOT_DEALT;
 
         if node.is_terminal() {
-            // Fold at flop level - this is a flop terminal
-            if is_flop_level {
-                // Use pot size as the hash key (must match evaluation.rs compute_path_hash_simple)
-                let pot_size = game.tree_config().starting_pot + 2 * node.amount();
-                let pot_hash = pot_size as u64;
-                let terminal_ev = self.extract_fold_terminal(game, node_index, pot_hash)?;
-                self.terminals.insert(pot_hash, terminal_ev);
-            }
+            // Fold terminals are handled by standard evaluation logic (not EV map)
             return Ok(());
         }
 
         if node.is_chance() {
             // Chance node at flop level = deal turn = flop action is complete
-            // This is a flop terminal - extract EVs
             if is_flop_level {
-                // Use pot size as the hash key (must match evaluation.rs compute_path_hash_simple)
                 let pot_size = game.tree_config().starting_pot + 2 * node.amount();
-                let pot_hash = pot_size as u64;
-                let terminal_ev = self.extract_showdown_terminal(game, node_index, pot_hash)?;
-                self.terminals.insert(pot_hash, terminal_ev);
+                let prev_action = node.prev_action();
+                let path_hash = Self::compute_compound_key(pot_size, prev_action);
+                println!("[EV_MAP] Extracting chance node: pot={} prev_action={:?} hash={}",
+                    pot_size, prev_action, path_hash);
+                let terminal_ev = self.extract_showdown_terminal(game, node_index, path_hash)?;
+                self.terminals.insert(path_hash, terminal_ev);
             }
             // Don't recurse into turn/river - we only care about flop terminals
             return Ok(());
@@ -213,13 +228,30 @@ impl EvMap {
         let children_offset = node.children_offset() as usize;
         drop(node);
 
-        for i in 0..num_actions {
-            let child_index = node_index + children_offset + i;
-            // Continue recursion (path_hash not used, we use pot_size at terminals)
-            self.extract_terminals_recursive(game, child_index, 0)?;
+        for action_idx in 0..num_actions {
+            let child_index = node_index + children_offset + action_idx;
+            self.extract_terminals_recursive(game, child_index)?;
         }
 
         Ok(())
+    }
+
+    /// Compute a compound key from (pot_size, prev_action)
+    /// This should uniquely identify chance nodes at flop level
+    pub fn compute_compound_key(pot_size: i32, prev_action: crate::action_tree::Action) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        pot_size.hash(&mut hasher);
+        // Hash the action type and amount (if any)
+        std::mem::discriminant(&prev_action).hash(&mut hasher);
+        match prev_action {
+            crate::action_tree::Action::Bet(amt) |
+            crate::action_tree::Action::Raise(amt) |
+            crate::action_tree::Action::AllIn(amt) => amt.hash(&mut hasher),
+            _ => {}
+        }
+        hasher.finish()
     }
 
     /// Extract EVs at a fold terminal (one player folds)
@@ -1017,6 +1049,9 @@ impl EvMap {
     /// Look up EV for a hand at a given path with Range-Agnostic transfer
     ///
     /// Formula: EV_final = Precomputed_EV × (Current_Equity / Precomputed_Equity)
+    ///
+    /// Note: The EV map only contains chance nodes (not fold terminals).
+    /// Fold terminals are handled by standard evaluation logic.
     pub fn get_ev_with_transfer(
         &self,
         path_hash: u64,
@@ -1033,8 +1068,8 @@ impl EvMap {
                 if precomputed_equity > 0.001 {
                     let ev_final = precomputed_ev * (current_equity / precomputed_equity);
                     return Some(ev_final);
-                } else if current_equity < 0.001 {
-                    // Both near zero - use precomputed directly
+                } else {
+                    // Very low precomputed equity - use EV directly to avoid division issues
                     return Some(precomputed_ev);
                 }
             }

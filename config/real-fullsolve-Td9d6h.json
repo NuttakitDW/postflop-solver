@@ -37,16 +37,16 @@
   },
   "solver": {
     "maxIterations": 1000,
-    "targetExploitabilityPercent": 0.5,
+    "targetExploitabilityPercent": 0.3,
     "useCompression": true,
     "exportFlopOnly": true,
     "warmStartFrom": null,
     "saveRegretSnapshot": null,
-    "loadEvMap": null
+    "extractEvMap": null
   },
   "output": {
-    "filename": "out/Td9d6h-floponly-evmap.flop",
-    "compressionLevel": 3,
-    "memo": "Flop-only solve using precomputed EV map - should achieve ~31% IP check rate"
+    "filename": "out/Td9d6h-real-fullsolve.flop",
+    "compressionLevel": 10,
+    "memo": "Real full tree solve (not flop-only) for comparison"
   }
 }

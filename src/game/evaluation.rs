@@ -94,20 +94,11 @@ impl PostFlopGame {
             }
         }
         // equity terminal (flop-only mode: non-fold terminal at flop level)
-        // Uses EV map if available, otherwise computes equity by averaging showdown results
+        // Uses equity-based evaluation by averaging showdown results over all runouts
+        // Note: EV map lookup was disabled due to extraction issues and theoretical
+        // limitations (static EVs don't help CFR converge - see PDCFR+ paper)
         else if node.turn == NOT_DEALT && self.is_flop_only_mode() {
-            #[cfg(feature = "bincode")]
-            {
-                if self.ev_map.is_some() {
-                    self.evaluate_with_ev_map(result, node, player, cfreach);
-                } else {
-                    self.evaluate_flop_equity(result, node, player, cfreach);
-                }
-            }
-            #[cfg(not(feature = "bincode"))]
-            {
-                self.evaluate_flop_equity(result, node, player, cfreach);
-            }
+            self.evaluate_flop_equity(result, node, player, cfreach);
         }
         // showdown (optimized for no rake; 2-pass)
         else if rake == 0.0 {
@@ -537,9 +528,8 @@ impl PostFlopGame {
         // Compute current equity for each hand against opponent's reach-weighted range
         let current_equities = self.compute_current_equities(player, cfreach);
 
-        // Compute path hash for this terminal
-        // For POC, use a simple hash based on pot size (different bet sizes = different paths)
-        let path_hash = self.compute_path_hash_simple(node);
+        // Compute path hash for this terminal using compound key (pot_size, prev_action)
+        let path_hash = self.compute_path_hash(node);
 
         // Initialize result to zero
         result.iter_mut().for_each(|v| *v = 0.0);
@@ -607,12 +597,23 @@ impl PostFlopGame {
                     // Show sample hands in the map for this terminal
                     if let Some(terminal) = ev_map.terminals.get(&path_hash) {
                         let data = if player == 0 { &terminal.oop_data } else { &terminal.ip_data };
-                        let sample_hands: Vec<_> = data.keys().take(10).collect();
-                        eprintln!("[EV_MAP DEBUG] Sample hands in map for pot={}: {:?} (total: {})",
-                            path_hash, sample_hands, data.len());
-                        // Check if our hand exists with different key format
-                        eprintln!("[EV_MAP DEBUG] Looking for key ({},{}), reversed: ({},{})",
-                            hand.0, hand.1, hand.1, hand.0);
+
+                        // Check specifically for our hand and nearby hands
+                        eprintln!("[EV_MAP DEBUG] Checking for hand (0,1): {:?}", data.get(&(0u8, 1u8)));
+                        eprintln!("[EV_MAP DEBUG] Checking for hand (1,0): {:?}", data.get(&(1u8, 0u8)));
+                        eprintln!("[EV_MAP DEBUG] Checking for hand (0,2): {:?}", data.get(&(0u8, 2u8)));
+                        eprintln!("[EV_MAP DEBUG] Checking for hand (0,3): {:?}", data.get(&(0u8, 3u8)));
+
+                        // Show first 10 hands sorted
+                        let mut all_hands: Vec<_> = data.keys().cloned().collect();
+                        all_hands.sort();
+                        eprintln!("[EV_MAP DEBUG] First 10 hands (sorted): {:?}", all_hands.iter().take(10).collect::<Vec<_>>());
+                        eprintln!("[EV_MAP DEBUG] Total hands in map: {}", data.len());
+
+                        // Check hand range - min and max cards
+                        let min_c1 = all_hands.iter().map(|h| h.0).min();
+                        let max_c1 = all_hands.iter().map(|h| h.0).max();
+                        eprintln!("[EV_MAP DEBUG] Card1 range: {:?} to {:?}", min_c1, max_c1);
                     }
                 }
 
@@ -767,12 +768,12 @@ impl PostFlopGame {
         base
     }
 
-    /// Compute a simple path hash for the current terminal.
-    /// For POC, we use the pot size as a proxy for different bet paths.
+    /// Compute path hash for the current terminal.
+    /// Uses compound key (pot_size, prev_action) to uniquely identify chance nodes.
     #[cfg(feature = "bincode")]
-    fn compute_path_hash_simple(&self, node: &PostFlopNode) -> u64 {
-        // Use pot size as a simple hash - different bet sizes lead to different pot sizes
+    fn compute_path_hash(&self, node: &PostFlopNode) -> u64 {
+        use crate::ev_map::EvMap;
         let pot = self.tree_config.starting_pot + 2 * node.amount;
-        pot as u64
+        EvMap::compute_compound_key(pot, node.prev_action)
     }
 }

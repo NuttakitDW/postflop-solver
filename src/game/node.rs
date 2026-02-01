@@ -264,4 +264,10 @@ impl PostFlopNode {
     pub fn amount(&self) -> i32 {
         self.amount
     }
+
+    /// Returns the previous action that led to this node.
+    #[inline]
+    pub fn prev_action(&self) -> crate::action_tree::Action {
+        self.prev_action
+    }
 }
