@@ -83,7 +83,80 @@ impl EvMap {
         ev_map.extract_terminals_recursive(game, 0, 0)?;
 
         println!("Extracted {} flop-terminal EV sets", ev_map.terminals.len());
+
+        // Validate the extracted EVs
+        ev_map.validate_extraction()?;
+
         Ok(ev_map)
+    }
+
+    /// Validate that extracted EVs are reasonable (non-zero, proper magnitudes)
+    fn validate_extraction(&self) -> Result<(), String> {
+        println!("\n=== EV Map Validation ===");
+
+        for (_path_hash, terminal) in &self.terminals {
+            let mut oop_zeros = 0;
+            let mut oop_total = 0;
+            let mut oop_sum = 0.0f64;
+            let mut ip_zeros = 0;
+            let mut ip_total = 0;
+            let mut ip_sum = 0.0f64;
+
+            for &(ev, _equity) in terminal.oop_data.values() {
+                oop_total += 1;
+                oop_sum += ev as f64;
+                if ev.abs() < 0.001 {
+                    oop_zeros += 1;
+                }
+            }
+
+            for &(ev, _equity) in terminal.ip_data.values() {
+                ip_total += 1;
+                ip_sum += ev as f64;
+                if ev.abs() < 0.001 {
+                    ip_zeros += 1;
+                }
+            }
+
+            let oop_avg = if oop_total > 0 { oop_sum / oop_total as f64 } else { 0.0 };
+            let ip_avg = if ip_total > 0 { ip_sum / ip_total as f64 } else { 0.0 };
+
+            println!(
+                "Terminal pot={}: OOP avg_ev={:.2}, zeros={}/{} ({:.1}%) | IP avg_ev={:.2}, zeros={}/{} ({:.1}%)",
+                terminal.pot_size,
+                oop_avg,
+                oop_zeros,
+                oop_total,
+                100.0 * oop_zeros as f64 / oop_total.max(1) as f64,
+                ip_avg,
+                ip_zeros,
+                ip_total,
+                100.0 * ip_zeros as f64 / ip_total.max(1) as f64
+            );
+
+            // Check for suspicious patterns
+            let oop_zero_pct = oop_zeros as f64 / oop_total.max(1) as f64;
+            let ip_zero_pct = ip_zeros as f64 / ip_total.max(1) as f64;
+
+            if oop_zero_pct > 0.9 {
+                return Err(format!(
+                    "VALIDATION FAILED: Terminal pot={} has {}% zero OOP EVs - extraction likely failed!",
+                    terminal.pot_size,
+                    (oop_zero_pct * 100.0) as i32
+                ));
+            }
+
+            if ip_zero_pct > 0.9 {
+                return Err(format!(
+                    "VALIDATION FAILED: Terminal pot={} has {}% zero IP EVs - extraction likely failed!",
+                    terminal.pot_size,
+                    (ip_zero_pct * 100.0) as i32
+                ));
+            }
+        }
+
+        println!("=== Validation PASSED ===\n");
+        Ok(())
     }
 
     /// Recursively find flop-terminal nodes and extract EVs
@@ -498,19 +571,45 @@ impl EvMap {
                 evs[hand_idx] = ev;
             }
         } else {
-            // Opponent is acting - average over opponent's strategy (simplified)
-            // This is an approximation - proper would weight by opponent reach
-            for hand_idx in 0..num_hands {
-                let mut ev = 0.0f32;
-                let mut total = 0.0f32;
+            // Opponent is acting - weight by opponent's average strategy across their range
+            // Compute average strategy for each action (averaged over opponent hands)
+            let opp_weights = game.initial_weights(acting_player);
+            let mut avg_strategy = vec![0.0f32; num_actions];
+            let mut total_weight = 0.0f32;
+
+            for (opp_hand_idx, &weight) in opp_weights.iter().enumerate() {
+                if weight <= 0.0 {
+                    continue;
+                }
+                total_weight += weight;
                 for action_idx in 0..num_actions {
-                    if action_idx < action_evs.len() && hand_idx < action_evs[action_idx].len() {
-                        // Use uniform weighting as approximation
-                        ev += action_evs[action_idx][hand_idx];
-                        total += 1.0;
+                    if action_idx < strategy.len() && opp_hand_idx < strategy[action_idx].len() {
+                        avg_strategy[action_idx] += weight * strategy[action_idx][opp_hand_idx];
                     }
                 }
-                evs[hand_idx] = if total > 0.0 { ev / total } else { 0.0 };
+            }
+
+            // Normalize average strategy
+            if total_weight > 0.0 {
+                for action_idx in 0..num_actions {
+                    avg_strategy[action_idx] /= total_weight;
+                }
+            } else {
+                // Fallback to uniform if no weights
+                for action_idx in 0..num_actions {
+                    avg_strategy[action_idx] = 1.0 / num_actions as f32;
+                }
+            }
+
+            // Use average strategy to weight EVs for each of our hands
+            for hand_idx in 0..num_hands {
+                let mut ev = 0.0f32;
+                for action_idx in 0..num_actions {
+                    if action_idx < action_evs.len() && hand_idx < action_evs[action_idx].len() {
+                        ev += avg_strategy[action_idx] * action_evs[action_idx][hand_idx];
+                    }
+                }
+                evs[hand_idx] = ev;
             }
         }
 
