@@ -506,6 +506,11 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 }
 
 fn main() {
+    // Initialize logger for debug output
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        .format_timestamp(None)
+        .init();
+
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {

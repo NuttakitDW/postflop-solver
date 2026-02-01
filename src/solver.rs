@@ -4,6 +4,10 @@ use crate::sliceop::*;
 use crate::utility::*;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
+use std::time::Instant;
+
+#[cfg(feature = "logging")]
+use log::debug;
 
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
@@ -15,7 +19,7 @@ struct DiscountParams {
 }
 
 impl DiscountParams {
-    pub fn new(current_iteration: u32) -> Self {
+    pub fn new(current_iteration: u32, convergence_mode: bool) -> Self {
         // 0, 1, 4, 16, 64, 256, ...
         let nearest_lower_power_of_4 = match current_iteration {
             0 => 0,
@@ -28,10 +32,27 @@ impl DiscountParams {
         let pow_alpha = t_alpha * t_alpha.sqrt();
         let pow_gamma = (t_gamma / (t_gamma + 1.0)).powi(3);
 
+        // In convergence mode (exploitability < 1%):
+        // - Higher alpha_t floor (0.9) = more conservative positive regret updates
+        // - Higher beta_t (0.9 vs 0.5) = preserve negative regrets to prevent imbalance
+        // - Higher gamma_t floor (0.9) = more strategy retention
+        // This prevents oscillations/spikes when close to optimal solution
+        let (alpha_t, beta_t, gamma_t) = if convergence_mode {
+            let alpha = ((pow_alpha / (pow_alpha + 1.0)) as f32).max(0.9);
+            let beta = 0.9; // Preserve negative regrets (default is 0.5 which causes imbalance)
+            let gamma = (pow_gamma as f32).max(0.9);
+            (alpha, beta, gamma)
+        } else {
+            let alpha = (pow_alpha / (pow_alpha + 1.0)) as f32;
+            let beta = 0.5;
+            let gamma = pow_gamma as f32;
+            (alpha, beta, gamma)
+        };
+
         Self {
-            alpha_t: (pow_alpha / (pow_alpha + 1.0)) as f32,
-            beta_t: 0.5,
-            gamma_t: pow_gamma as f32,
+            alpha_t,
+            beta_t,
+            gamma_t,
         }
     }
 }
@@ -62,6 +83,10 @@ pub fn solve<T: Game>(
     } else {
         0.0
     };
+    let solve_start = Instant::now();
+    // Once exploitability drops below 1%, enter convergence mode
+    // This applies higher floors to alpha_t and gamma_t to prevent oscillations
+    let mut convergence_mode = false;
 
     if print_progress {
         print!("iteration: 0 / {max_num_iterations} ");
@@ -79,7 +104,57 @@ pub fn solve<T: Game>(
             break;
         }
 
-        let params = DiscountParams::new(t);
+        // Check if this iteration is a power of 4 (reset iteration)
+        // Recalculate exploitability before reset decision to avoid using stale values
+        let is_power_of_4 = t > 0 && t == 1u32 << ((t.leading_zeros() ^ 31) & !1);
+        if is_power_of_4 {
+            let old_exploitability = exploitability;
+            exploitability = compute_exploitability(game);
+            #[cfg(feature = "logging")]
+            debug!(
+                "[{:.2}s] iter={}: POWER_OF_4 detected, recalculated exploitability: {:.4}% -> {:.4}%",
+                solve_start.elapsed().as_secs_f64(),
+                t,
+                old_exploitability / starting_pot * 100.0,
+                exploitability / starting_pot * 100.0
+            );
+        }
+
+        // Once exploitability drops below 1.0%, enter convergence mode
+        // This applies min floors: alpha_t >= 0.9, gamma_t >= 0.9 to prevent spikes
+        let current_percent = exploitability / starting_pot * 100.0;
+        if starting_pot > 0.0 && current_percent < 1.0 {
+            if !convergence_mode {
+                #[cfg(feature = "logging")]
+                debug!(
+                    "[{:.2}s] iter={}: exploitability dropped below 1% ({:.4}%), entering CONVERGENCE MODE (alpha_t >= 0.9, gamma_t >= 0.9)",
+                    solve_start.elapsed().as_secs_f64(),
+                    t,
+                    current_percent
+                );
+            }
+            convergence_mode = true;
+        }
+        let params = DiscountParams::new(t, convergence_mode);
+
+        // Log parameters for every iteration in debug mode
+        #[cfg(feature = "logging")]
+        {
+            // Log at power-of-4, or every iteration in spike investigation window
+            let in_spike_window = t >= 165 && t <= 200;
+            if is_power_of_4 || in_spike_window {
+                debug!(
+                    "[{:.2}s] iter={}: convergence_mode={}, current_percent={:.4}%, alpha_t={:.6}, beta_t={:.6}, gamma_t={:.6}",
+                    solve_start.elapsed().as_secs_f64(),
+                    t,
+                    convergence_mode,
+                    current_percent,
+                    params.alpha_t,
+                    params.beta_t,
+                    params.gamma_t
+                );
+            }
+        }
 
         // alternating updates
         for player in 0..2 {
@@ -94,8 +169,80 @@ pub fn solve<T: Game>(
             );
         }
 
-        if (t + 1) % 10 == 0 || t + 1 == max_num_iterations {
+        // Log root node scale factors and regret stats after update (compression only)
+        #[cfg(feature = "logging")]
+        {
+            let in_spike_window = t >= 165 && t <= 200;
+            if game.is_compression_enabled() && in_spike_window {
+                let strategy_scale = root.strategy_scale();
+                let regret_scale = root.regret_scale();
+
+                // Get regret statistics
+                let regrets = root.regrets_compressed();
+                let (min_regret, max_regret, pos_count, neg_count) = if !regrets.is_empty() {
+                    let min = regrets.iter().min().copied().unwrap_or(0);
+                    let max = regrets.iter().max().copied().unwrap_or(0);
+                    let pos = regrets.iter().filter(|&&r| r > 0).count();
+                    let neg = regrets.iter().filter(|&&r| r < 0).count();
+                    (min, max, pos, neg)
+                } else {
+                    (0, 0, 0, 0)
+                };
+
+                debug!(
+                    "[{:.2}s] iter={}: ROOT NODE: strategy_scale={:.4}, regret_scale={:.4}, regrets(min={}, max={}, pos={}, neg={})",
+                    solve_start.elapsed().as_secs_f64(),
+                    t,
+                    strategy_scale,
+                    regret_scale,
+                    min_regret,
+                    max_regret,
+                    pos_count,
+                    neg_count
+                );
+            }
+        }
+
+        // Calculate exploitability - more frequently in spike window for debugging
+        #[cfg(feature = "logging")]
+        let check_exploitability = {
+            let in_spike_window = t >= 165 && t <= 200;
+            (t + 1) % 10 == 0 || t + 1 == max_num_iterations || in_spike_window
+        };
+        #[cfg(not(feature = "logging"))]
+        let check_exploitability = (t + 1) % 10 == 0 || t + 1 == max_num_iterations;
+
+        if check_exploitability {
+            let old_exploitability = exploitability;
             exploitability = compute_exploitability(game);
+            #[cfg(feature = "logging")]
+            {
+                let old_percent = old_exploitability / starting_pot * 100.0;
+                let new_percent = exploitability / starting_pot * 100.0;
+                let delta = new_percent - old_percent;
+
+                // Always log in spike window, or if spike detected
+                let in_spike_window = t >= 165 && t <= 200;
+                if in_spike_window {
+                    debug!(
+                        "[{:.2}s] iter={}: EXPLOITABILITY: {:.4}% -> {:.4}% (delta: {:+.4}%)",
+                        solve_start.elapsed().as_secs_f64(),
+                        t + 1,
+                        old_percent,
+                        new_percent,
+                        delta
+                    );
+                } else if delta > 0.1 {
+                    debug!(
+                        "[{:.2}s] iter={}: SPIKE DETECTED! exploitability: {:.4}% -> {:.4}% (delta: +{:.4}%)",
+                        solve_start.elapsed().as_secs_f64(),
+                        t + 1,
+                        old_percent,
+                        new_percent,
+                        delta
+                    );
+                }
+            }
         }
 
         if print_progress {
@@ -132,7 +279,7 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration);
+    let params = DiscountParams::new(current_iteration, false);
 
     // alternating updates
     for player in 0..2 {
