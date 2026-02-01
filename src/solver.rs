@@ -83,7 +83,7 @@ pub fn solve<T: Game>(
     } else {
         0.0
     };
-    let solve_start = Instant::now();
+    let _solve_start = Instant::now();
     // Once exploitability drops below 1%, enter convergence mode
     // This applies higher floors to alpha_t and gamma_t to prevent oscillations
     let mut convergence_mode = false;
@@ -108,7 +108,7 @@ pub fn solve<T: Game>(
         // Recalculate exploitability before reset decision to avoid using stale values
         let is_power_of_4 = t > 0 && t == 1u32 << ((t.leading_zeros() ^ 31) & !1);
         if is_power_of_4 {
-            let old_exploitability = exploitability;
+            let _old_exploitability = exploitability;
             exploitability = compute_exploitability(game);
             #[cfg(feature = "logging")]
             debug!(
@@ -221,7 +221,7 @@ pub fn solve<T: Game>(
         let check_exploitability = (t + 1) % 10 == 0 || t + 1 == max_num_iterations;
 
         if check_exploitability {
-            let old_exploitability = exploitability;
+            let _old_exploitability = exploitability;
             exploitability = compute_exploitability(game);
             #[cfg(feature = "logging")]
             {

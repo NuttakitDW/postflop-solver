@@ -3,8 +3,6 @@ use crate::card::NOT_DEALT;
 use crate::sliceop::*;
 use std::mem::MaybeUninit;
 
-#[cfg(feature = "bincode")]
-use crate::ev_map::EvMap;
 
 #[inline]
 fn min(x: f64, y: f64) -> f64 {
