@@ -420,20 +420,27 @@ impl EvMap {
         let node = game.node_arena()[chance_node_index].lock();
         let num_children = node.num_actions();
         let children_offset = node.children_offset() as usize;
+        let pot_size = game.tree_config().starting_pot + 2 * node.amount();
         drop(node);
+
+        // For debugging: track if we're getting all zeros
+        let mut total_non_zero = 0usize;
 
         // Traverse all turn children
         for child_idx in 0..num_children {
             let child_node_index = chance_node_index + children_offset + child_idx;
 
             // Get EVs from this turn subtree
-            let child_evs = self.compute_subtree_evs(game, child_node_index, player);
+            let child_evs = self.compute_subtree_evs(game, child_node_index, player, 0);
 
             // Accumulate EVs (each turn card contributes equally)
             for (hand_idx, &ev) in child_evs.iter().enumerate() {
                 if hand_idx < num_hands && !ev.is_nan() {
                     evs[hand_idx] += ev;
                     counts[hand_idx] += 1.0;
+                    if ev.abs() > 0.001 {
+                        total_non_zero += 1;
+                    }
                 }
             }
         }
@@ -443,6 +450,12 @@ impl EvMap {
             if counts[i] > 0.0 {
                 evs[i] /= counts[i];
             }
+        }
+
+        // Debug: warn if all zeros
+        if total_non_zero == 0 {
+            eprintln!("[EV_MAP DEBUG] Traversal for player {} at pot={} returned all zeros! num_children={}",
+                player, pot_size, num_children);
         }
 
         evs
@@ -455,30 +468,52 @@ impl EvMap {
         game: &PostFlopGame,
         node_index: usize,
         player: usize,
+        depth: usize,
     ) -> Vec<f32> {
+        use crate::action_tree::PLAYER_FOLD_FLAG;
+
         let node = game.node_arena()[node_index].lock();
         let num_hands = game.private_cards(player).len();
         let is_compressed = game.is_compression_enabled();
 
         if node.is_terminal() {
-            // Terminal node: use cfvalues if available, or compute from payoff
-            let folder = (node.player() & 0x03) as usize;
+            let player_byte = node.player() as u8;
             let amount = node.amount();
             let pot_size = game.tree_config().starting_pot + 2 * amount;
+
+            // Check if this is a FOLD terminal (PLAYER_FOLD_FLAG = 24 = 0x18)
+            let is_fold = (player_byte & PLAYER_FOLD_FLAG) == PLAYER_FOLD_FLAG;
+
+            if is_fold {
+                // Fold terminal: one player folded
+                let folder = (player_byte & 0x03) as usize;
+                drop(node);
+
+                let mut evs = vec![0.0f32; num_hands];
+                for hand_idx in 0..num_hands {
+                    if folder == player {
+                        // This player folded - loses contribution
+                        evs[hand_idx] = -(amount as f32);
+                    } else {
+                        // Other player folded - wins pot
+                        evs[hand_idx] = (pot_size - amount) as f32;
+                    }
+                }
+                return evs;
+            }
+
+            // Showdown terminal: compute EVs using hand strength
+            let turn_card = node.turn();
+            let river_card = node.river();
             drop(node);
 
-            // At fold terminal, one player wins the pot
-            let mut evs = vec![0.0f32; num_hands];
-            for (hand_idx, _) in game.private_cards(player).iter().enumerate() {
-                if folder == player {
-                    // This player folded - loses contribution
-                    evs[hand_idx] = -(amount as f32);
-                } else {
-                    // Other player folded - wins pot
-                    evs[hand_idx] = (pot_size - amount) as f32;
-                }
+            // If we don't have complete board, return zeros (shouldn't happen at river)
+            if turn_card == crate::card::NOT_DEALT || river_card == crate::card::NOT_DEALT {
+                return vec![0.0f32; num_hands];
             }
-            return evs;
+
+            // Compute showdown EVs using hand strengths
+            return self.compute_showdown_evs(game, player, turn_card, river_card, pot_size);
         }
 
         if node.is_chance() {
@@ -510,7 +545,7 @@ impl EvMap {
 
             for child_idx in 0..num_children {
                 let child_node_index = node_index + children_offset + child_idx;
-                let child_evs = self.compute_subtree_evs(game, child_node_index, player);
+                let child_evs = self.compute_subtree_evs(game, child_node_index, player, depth + 1);
 
                 for (hand_idx, &ev) in child_evs.iter().enumerate() {
                     if hand_idx < num_hands && !ev.is_nan() {
@@ -529,35 +564,98 @@ impl EvMap {
             return evs;
         }
 
-        // Action node: compute weighted average of children based on strategies
+        // Action node: try to use stored cfvalues first
         let acting_player = (node.player() & 0x03) as usize;
         let num_actions = node.num_actions();
         let children_offset = node.children_offset() as usize;
 
-        // Try to get strategy probabilities
+        // Try to use stored cfvalues directly at this action node
+        // At action nodes: cfvalues = acting player's CF values per action
+        //                  cfvalues_ip = IP's CF values when OOP acts
+        let stored_cfvalues: Option<Vec<f32>> = if acting_player == player {
+            // Acting player's cfvalues are in storage2
+            let cf_len = num_actions * num_hands;
+            if is_compressed {
+                let slice = node.cfvalues_compressed();
+                if slice.len() >= cf_len {
+                    let scale = node.cfvalue_scale();
+                    Some(slice[..cf_len].iter().map(|&v| v as f32 * scale / i16::MAX as f32).collect())
+                } else {
+                    None
+                }
+            } else {
+                let slice = node.cfvalues();
+                if slice.len() >= cf_len {
+                    Some(slice[..cf_len].to_vec())
+                } else {
+                    None
+                }
+            }
+        } else if player == 1 && acting_player == 0 && node.has_cfvalues_ip() {
+            // IP wants EVs, OOP is acting: use cfvalues_ip
+            let cf_len = num_actions * num_hands;
+            if is_compressed {
+                let slice = node.cfvalues_ip_compressed();
+                if slice.len() >= cf_len {
+                    let scale = node.cfvalue_ip_scale();
+                    Some(slice[..cf_len].iter().map(|&v| v as f32 * scale / i16::MAX as f32).collect())
+                } else {
+                    None
+                }
+            } else {
+                let slice = node.cfvalues_ip();
+                if slice.len() >= cf_len {
+                    Some(slice[..cf_len].to_vec())
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // If we have stored cfvalues, use them with strategy to compute expected EV
+        if let Some(cfv) = stored_cfvalues {
+            // Get strategy for the acting player
+            let strategy = self.get_node_strategy(game, &node, num_actions, num_hands, is_compressed);
+            drop(node);
+
+            // Compute expected EV: sum(strategy[action][hand] * cfvalue[action][hand])
+            let mut evs = vec![0.0f32; num_hands];
+            for hand_idx in 0..num_hands {
+                let mut ev = 0.0f32;
+                for action_idx in 0..num_actions {
+                    let cf_idx = action_idx * num_hands + hand_idx;
+                    if cf_idx < cfv.len() && action_idx < strategy.len() && hand_idx < strategy[action_idx].len() {
+                        ev += strategy[action_idx][hand_idx] * cfv[cf_idx];
+                    }
+                }
+                evs[hand_idx] = ev;
+            }
+            return evs;
+        }
+
+        // Fallback: compute EVs by recursing into children
         let strategy: Vec<Vec<f32>> = if acting_player == player {
-            // Get this player's strategy at this node
             self.get_node_strategy(game, &node, num_actions, num_hands, is_compressed)
         } else {
-            // For opponent's node, we need their strategy
             let opp_hands = game.private_cards(acting_player).len();
             self.get_node_strategy(game, &node, num_actions, opp_hands, is_compressed)
         };
 
         drop(node);
 
-        // Compute EVs for each action
+        // Compute EVs for each action by recursing
         let mut action_evs: Vec<Vec<f32>> = Vec::new();
         for action_idx in 0..num_actions {
             let child_node_index = node_index + children_offset + action_idx;
-            action_evs.push(self.compute_subtree_evs(game, child_node_index, player));
+            action_evs.push(self.compute_subtree_evs(game, child_node_index, player, depth + 1));
         }
 
         // Compute expected EV based on strategy
         let mut evs = vec![0.0f32; num_hands];
 
         if acting_player == player {
-            // This player is acting - use their strategy to weight EVs
             for hand_idx in 0..num_hands {
                 let mut ev = 0.0f32;
                 for action_idx in 0..num_actions {
@@ -571,8 +669,7 @@ impl EvMap {
                 evs[hand_idx] = ev;
             }
         } else {
-            // Opponent is acting - weight by opponent's average strategy across their range
-            // Compute average strategy for each action (averaged over opponent hands)
+            // Opponent is acting - weight by opponent's average strategy
             let opp_weights = game.initial_weights(acting_player);
             let mut avg_strategy = vec![0.0f32; num_actions];
             let mut total_weight = 0.0f32;
@@ -589,19 +686,16 @@ impl EvMap {
                 }
             }
 
-            // Normalize average strategy
             if total_weight > 0.0 {
                 for action_idx in 0..num_actions {
                     avg_strategy[action_idx] /= total_weight;
                 }
             } else {
-                // Fallback to uniform if no weights
                 for action_idx in 0..num_actions {
                     avg_strategy[action_idx] = 1.0 / num_actions as f32;
                 }
             }
 
-            // Use average strategy to weight EVs for each of our hands
             for hand_idx in 0..num_hands {
                 let mut ev = 0.0f32;
                 for action_idx in 0..num_actions {
@@ -610,6 +704,86 @@ impl EvMap {
                     }
                 }
                 evs[hand_idx] = ev;
+            }
+        }
+
+        evs
+    }
+
+    /// Compute showdown EVs at a river terminal for a player.
+    /// Uses hand strength data to determine win/lose/tie outcomes.
+    fn compute_showdown_evs(
+        &self,
+        game: &PostFlopGame,
+        player: usize,
+        turn: crate::card::Card,
+        river: crate::card::Card,
+        pot_size: i32,
+    ) -> Vec<f32> {
+        use crate::card::card_pair_to_index;
+        use crate::card::StrengthItem;
+
+        let num_hands = game.private_cards(player).len();
+        let mut evs = vec![0.0f32; num_hands];
+
+        let pair_index = card_pair_to_index(turn, river);
+        let hand_strength = game.hand_strength();
+
+        if pair_index >= hand_strength.len() {
+            return evs;
+        }
+
+        let player_strength = &hand_strength[pair_index][player];
+        let opponent_strength = &hand_strength[pair_index][player ^ 1];
+
+        if player_strength.len() < 3 || opponent_strength.len() < 3 {
+            return evs;
+        }
+
+        let opp_weights = game.initial_weights(player ^ 1);
+        let half_pot = pot_size as f32 / 2.0;
+
+        // For each of our hands, compute showdown EV against opponent range
+        // This is a simplified version - assumes uniform opponent reach
+        let valid_player_strength = &player_strength[1..player_strength.len() - 1];
+        let valid_opponent_strength = &opponent_strength[1..opponent_strength.len() - 1];
+
+        // Count total opponent combinations and cumulative weights by strength
+        let mut total_opp_weight = 0.0f64;
+        for &StrengthItem { index, .. } in valid_opponent_strength {
+            let weight = opp_weights.get(index as usize).copied().unwrap_or(0.0) as f64;
+            total_opp_weight += weight;
+        }
+
+        if total_opp_weight <= 0.0 {
+            return evs;
+        }
+
+        // For each player hand, compute EV based on equity vs opponent range
+        for &StrengthItem { strength: player_str, index: player_idx } in valid_player_strength {
+            let mut win_weight = 0.0f64;
+            let mut tie_weight = 0.0f64;
+
+            for &StrengthItem { strength: opp_str, index: opp_idx } in valid_opponent_strength {
+                let weight = opp_weights.get(opp_idx as usize).copied().unwrap_or(0.0) as f64;
+                if weight <= 0.0 {
+                    continue;
+                }
+
+                if player_str > opp_str {
+                    win_weight += weight;
+                } else if player_str == opp_str {
+                    tie_weight += weight;
+                }
+            }
+
+            // EV = (win_prob * pot) + (tie_prob * 0) - (lose_prob * contribution)
+            // Simplified: EV = equity * pot - half_pot (our contribution)
+            let equity = (win_weight + 0.5 * tie_weight) / total_opp_weight;
+            let ev = (equity as f32) * (pot_size as f32) - half_pot;
+
+            if (player_idx as usize) < num_hands {
+                evs[player_idx as usize] = ev;
             }
         }
 
