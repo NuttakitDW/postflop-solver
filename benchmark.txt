@@ -1,7 +1,0 @@
-=== Summary ===
-Output file: out/50bb-small.flop
-Solve time: 1889.34s
-Total time: 1929.01s
-Exploitability: 0.1779 (0.292% of pot)
-Memory: 43223.63 MB
-OOP hands: 860, IP hands: 652
