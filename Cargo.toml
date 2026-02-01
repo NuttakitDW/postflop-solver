@@ -23,7 +23,7 @@ serde_json = "1.0"
 env_logger = "0.10"
 
 [features]
-default = ["bincode", "rayon"]
+default = ["bincode", "rayon", "zstd"]
 custom-alloc = []
 logging = ["dep:log"]
 rayon = ["dep:rayon", "zstd?/zstdmt"]
