@@ -156,6 +156,14 @@ pub fn solve<T: Game>(
             }
         }
 
+        // Save current regrets for PDCFR+ prediction (before they get updated)
+        let is_predictive = game.is_predictive_enabled();
+        if is_predictive {
+            drop(root);
+            game.save_regrets_for_prediction();
+            root = game.root();
+        }
+
         // alternating updates
         for player in 0..2 {
             let mut result = Vec::with_capacity(game.num_private_hands(player));
@@ -166,6 +174,7 @@ pub fn solve<T: Game>(
                 player,
                 game.initial_weights(player ^ 1),
                 &params,
+                is_predictive,
             );
         }
 
@@ -288,6 +297,7 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
 
     let mut root = game.root();
     let params = DiscountParams::new(current_iteration, false);
+    let is_predictive = game.is_predictive_enabled();
 
     // alternating updates
     for player in 0..2 {
@@ -299,6 +309,7 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
             player,
             game.initial_weights(player ^ 1),
             &params,
+            is_predictive,
         );
     }
 }
@@ -311,6 +322,7 @@ fn solve_recursive<T: Game>(
     player: usize,
     cfreach: &[f32],
     params: &DiscountParams,
+    is_predictive: bool,
 ) {
     // return the counterfactual values when the `node` is terminal
     if node.is_terminal() {
@@ -324,7 +336,7 @@ fn solve_recursive<T: Game>(
     // simply recurse when the number of actions is one
     if num_actions == 1 && !node.is_chance() {
         let child = &mut node.play(0);
-        solve_recursive(result, game, child, player, cfreach, params);
+        solve_recursive(result, game, child, player, cfreach, params, is_predictive);
         return;
     }
 
@@ -357,6 +369,7 @@ fn solve_recursive<T: Game>(
                 player,
                 &cfreach_updated,
                 params,
+                is_predictive,
             );
         });
 
@@ -404,12 +417,26 @@ fn solve_recursive<T: Game>(
                 player,
                 cfreach,
                 params,
+                is_predictive,
             );
         });
 
-        // compute the strategy by regret-maching algorithm
+        // compute the strategy by regret-matching algorithm
+        // For PDCFR+: use predicted regrets R_predict = 2*R_t - R_{t-1}
         let mut strategy = if game.is_compression_enabled() {
-            regret_matching_compressed(node.regrets_compressed(), num_actions)
+            if is_predictive {
+                regret_matching_predictive_compressed(
+                    node.regrets_compressed(),
+                    node.prev_regrets_compressed(),
+                    node.regret_scale(),
+                    node.prev_regret_scale(),
+                    num_actions,
+                )
+            } else {
+                regret_matching_compressed(node.regrets_compressed(), num_actions)
+            }
+        } else if is_predictive {
+            regret_matching_predictive(node.regrets(), node.prev_regrets(), num_actions)
         } else {
             regret_matching(node.regrets(), num_actions)
         };
@@ -491,8 +518,21 @@ fn solve_recursive<T: Game>(
     // if the current player is not `player`
     else {
         // compute the strategy by regret-matching algorithm
+        // For PDCFR+: use predicted regrets R_predict = 2*R_t - R_{t-1}
         let mut cfreach_actions = if game.is_compression_enabled() {
-            regret_matching_compressed(node.regrets_compressed(), num_actions)
+            if is_predictive {
+                regret_matching_predictive_compressed(
+                    node.regrets_compressed(),
+                    node.prev_regrets_compressed(),
+                    node.regret_scale(),
+                    node.prev_regret_scale(),
+                    num_actions,
+                )
+            } else {
+                regret_matching_compressed(node.regrets_compressed(), num_actions)
+            }
+        } else if is_predictive {
+            regret_matching_predictive(node.regrets(), node.prev_regrets(), num_actions)
         } else {
             regret_matching(node.regrets(), num_actions)
         };
@@ -516,6 +556,7 @@ fn solve_recursive<T: Game>(
                 player,
                 row(&cfreach_actions, action, row_size),
                 params,
+                is_predictive,
             );
         });
 
@@ -600,6 +641,176 @@ fn regret_matching_compressed(regret: &[i16], num_actions: usize) -> Vec<f32, St
 fn regret_matching_compressed(regret: &[i16], num_actions: usize) -> Vec<f32> {
     let mut strategy = Vec::with_capacity(regret.len());
     strategy.extend(regret.iter().map(|&r| r.max(0) as f32));
+
+    let row_size = strategy.len() / num_actions;
+    let mut denom = Vec::with_capacity(row_size);
+    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
+    unsafe { denom.set_len(row_size) };
+
+    let default = 1.0 / num_actions as f32;
+    strategy.chunks_exact_mut(row_size).for_each(|row| {
+        div_slice(row, &denom, default);
+    });
+
+    strategy
+}
+
+/// Computes the strategy by regret-matching algorithm using PDCFR+ predicted regrets.
+/// R_predict = 2*R_current - R_prev
+#[cfg(feature = "custom-alloc")]
+#[inline]
+fn regret_matching_predictive(
+    regret: &[f32],
+    prev_regret: &[f32],
+    num_actions: usize,
+) -> Vec<f32, StackAlloc> {
+    let mut strategy = Vec::with_capacity_in(regret.len(), StackAlloc);
+    let uninit = strategy.spare_capacity_mut();
+
+    // If prev_regret is empty (first iteration), use standard regret matching
+    if prev_regret.is_empty() {
+        uninit.iter_mut().zip(regret).for_each(|(s, r)| {
+            s.write(max(*r, 0.0));
+        });
+    } else {
+        // R_predict = 2*R_current - R_prev
+        uninit
+            .iter_mut()
+            .zip(regret.iter().zip(prev_regret))
+            .for_each(|(s, (r, p))| {
+                let predicted = 2.0 * r - p;
+                s.write(max(predicted, 0.0));
+            });
+    }
+    unsafe { strategy.set_len(regret.len()) };
+
+    let row_size = regret.len() / num_actions;
+    let mut denom = Vec::with_capacity_in(row_size, StackAlloc);
+    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
+    unsafe { denom.set_len(row_size) };
+
+    let default = 1.0 / num_actions as f32;
+    strategy.chunks_exact_mut(row_size).for_each(|row| {
+        div_slice(row, &denom, default);
+    });
+
+    strategy
+}
+
+/// Computes the strategy by regret-matching algorithm using PDCFR+ predicted regrets.
+/// R_predict = 2*R_current - R_prev
+#[cfg(not(feature = "custom-alloc"))]
+#[inline]
+fn regret_matching_predictive(
+    regret: &[f32],
+    prev_regret: &[f32],
+    num_actions: usize,
+) -> Vec<f32> {
+    let mut strategy = Vec::with_capacity(regret.len());
+    let uninit = strategy.spare_capacity_mut();
+
+    // If prev_regret is empty (first iteration), use standard regret matching
+    if prev_regret.is_empty() {
+        uninit.iter_mut().zip(regret).for_each(|(s, r)| {
+            s.write(max(*r, 0.0));
+        });
+    } else {
+        // R_predict = 2*R_current - R_prev
+        uninit
+            .iter_mut()
+            .zip(regret.iter().zip(prev_regret))
+            .for_each(|(s, (r, p))| {
+                let predicted = 2.0 * r - p;
+                s.write(max(predicted, 0.0));
+            });
+    }
+    unsafe { strategy.set_len(regret.len()) };
+
+    let row_size = regret.len() / num_actions;
+    let mut denom = Vec::with_capacity(row_size);
+    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
+    unsafe { denom.set_len(row_size) };
+
+    let default = 1.0 / num_actions as f32;
+    strategy.chunks_exact_mut(row_size).for_each(|row| {
+        div_slice(row, &denom, default);
+    });
+
+    strategy
+}
+
+/// Computes the strategy by regret-matching algorithm using PDCFR+ predicted regrets (compressed).
+/// R_predict = 2*R_current - R_prev
+#[cfg(feature = "custom-alloc")]
+#[inline]
+fn regret_matching_predictive_compressed(
+    regret: &[i16],
+    prev_regret: &[i16],
+    scale: f32,
+    prev_scale: f32,
+    num_actions: usize,
+) -> Vec<f32, StackAlloc> {
+    let mut strategy = Vec::with_capacity_in(regret.len(), StackAlloc);
+
+    // If prev_regret is empty (first iteration), use standard regret matching
+    if prev_regret.is_empty() {
+        strategy.extend(regret.iter().map(|&r| r.max(0) as f32));
+    } else {
+        // Decode and compute R_predict = 2*R_current - R_prev
+        // Note: scale factors convert compressed i16 values back to actual regrets
+        let scale_factor = scale / i16::MAX as f32;
+        let prev_scale_factor = prev_scale / i16::MAX as f32;
+
+        strategy.extend(regret.iter().zip(prev_regret).map(|(&r, &p)| {
+            let r_decoded = r as f32 * scale_factor;
+            let p_decoded = p as f32 * prev_scale_factor;
+            let predicted = 2.0 * r_decoded - p_decoded;
+            predicted.max(0.0)
+        }));
+    }
+
+    let row_size = strategy.len() / num_actions;
+    let mut denom = Vec::with_capacity_in(row_size, StackAlloc);
+    sum_slices_uninit(denom.spare_capacity_mut(), &strategy);
+    unsafe { denom.set_len(row_size) };
+
+    let default = 1.0 / num_actions as f32;
+    strategy.chunks_exact_mut(row_size).for_each(|row| {
+        div_slice(row, &denom, default);
+    });
+
+    strategy
+}
+
+/// Computes the strategy by regret-matching algorithm using PDCFR+ predicted regrets (compressed).
+/// R_predict = 2*R_current - R_prev
+#[cfg(not(feature = "custom-alloc"))]
+#[inline]
+fn regret_matching_predictive_compressed(
+    regret: &[i16],
+    prev_regret: &[i16],
+    scale: f32,
+    prev_scale: f32,
+    num_actions: usize,
+) -> Vec<f32> {
+    let mut strategy = Vec::with_capacity(regret.len());
+
+    // If prev_regret is empty (first iteration), use standard regret matching
+    if prev_regret.is_empty() {
+        strategy.extend(regret.iter().map(|&r| r.max(0) as f32));
+    } else {
+        // Decode and compute R_predict = 2*R_current - R_prev
+        // Note: scale factors convert compressed i16 values back to actual regrets
+        let scale_factor = scale / i16::MAX as f32;
+        let prev_scale_factor = prev_scale / i16::MAX as f32;
+
+        strategy.extend(regret.iter().zip(prev_regret).map(|(&r, &p)| {
+            let r_decoded = r as f32 * scale_factor;
+            let p_decoded = p as f32 * prev_scale_factor;
+            let predicted = 2.0 * r_decoded - p_decoded;
+            predicted.max(0.0)
+        }));
+    }
 
     let row_size = strategy.len() / num_actions;
     let mut denom = Vec::with_capacity(row_size);

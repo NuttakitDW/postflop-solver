@@ -133,6 +133,19 @@ impl Game for PostFlopGame {
     fn aggregate_regrets_by_cluster(&mut self) {
         PostFlopGame::aggregate_regrets_by_cluster(self);
     }
+
+    #[inline]
+    fn is_predictive_enabled(&self) -> bool {
+        self.predictive_enabled
+    }
+
+    #[inline]
+    fn save_regrets_for_prediction(&mut self) {
+        if !self.predictive_enabled {
+            return;
+        }
+        PostFlopGame::save_regrets_for_prediction(self);
+    }
 }
 
 impl PostFlopGame {
@@ -427,6 +440,11 @@ impl PostFlopGame {
         self.storage_ip = vec![0; storage_ip_bytes];
         self.storage_chance = vec![0; storage_chance_bytes];
 
+        // Allocate previous regrets storage for PDCFR+ if enabled
+        if self.predictive_enabled {
+            self.storage_prev = vec![0; storage_bytes];
+        }
+
         if self.solve_flop_only {
             self.allocate_memory_nodes_flop_only();
         } else {
@@ -666,6 +684,7 @@ impl PostFlopGame {
         self.storage2 = Vec::new();
         self.storage_ip = Vec::new();
         self.storage_chance = Vec::new();
+        self.storage_prev = Vec::new();
     }
 
     /// Counts the number of nodes in the game tree.
@@ -1506,6 +1525,7 @@ impl PostFlopGame {
         let mut action_counter = 0;
         let mut ip_counter = 0;
         let mut chance_counter = 0;
+        let predictive_enabled = self.predictive_enabled;
 
         for node in &self.node_arena {
             let mut node = node.lock();
@@ -1525,6 +1545,12 @@ impl PostFlopGame {
                     node.storage1 = ptr1.add(action_counter);
                     node.storage2 = ptr2.add(action_counter);
                     node.storage3 = ptr3.add(ip_counter);
+
+                    // Assign storage4 for previous regrets if PDCFR+ is enabled
+                    if predictive_enabled {
+                        let ptr4 = self.storage_prev.as_mut_ptr();
+                        node.storage4 = ptr4.add(action_counter);
+                    }
                 }
                 action_counter += num_bytes * node.num_elements as usize;
                 ip_counter += num_bytes * node.num_elements_ip as usize;
@@ -1561,6 +1587,7 @@ impl PostFlopGame {
         let num_bytes = if self.is_compression_enabled { 2 } else { 4 };
         let mut action_counter = 0;
         let mut ip_counter = 0;
+        let predictive_enabled = self.predictive_enabled;
 
         for node in &self.node_arena {
             let mut node = node.lock();
@@ -1586,6 +1613,12 @@ impl PostFlopGame {
                 node.storage1 = ptr1.add(action_counter);
                 node.storage2 = ptr2.add(action_counter);
                 node.storage3 = ptr3.add(ip_counter);
+
+                // Assign storage4 for previous regrets if PDCFR+ is enabled
+                if predictive_enabled {
+                    let ptr4 = self.storage_prev.as_mut_ptr();
+                    node.storage4 = ptr4.add(action_counter);
+                }
             }
             action_counter += num_bytes * node.num_elements as usize;
             ip_counter += num_bytes * node.num_elements_ip as usize;
@@ -1910,6 +1943,51 @@ impl PostFlopGame {
                 let cluster = cluster_id as usize;
                 if cluster < num_clusters {
                     regrets[action_offset + hand_idx] = cluster_avgs[cluster];
+                }
+            }
+        }
+    }
+
+    /// Enables or disables Predictive DCFR+ (PDCFR+) mode.
+    ///
+    /// When enabled, the solver uses predicted regrets for strategy computation:
+    /// R_predict = 2*R_t - R_{t-1}
+    ///
+    /// This can significantly speed up convergence, especially in early iterations.
+    /// Must be called before `allocate_memory()`.
+    ///
+    /// Note: PDCFR+ requires additional memory (~same as regret storage) to store
+    /// the previous iteration's regrets.
+    #[inline]
+    pub fn set_predictive_mode(&mut self, enabled: bool) {
+        if self.state >= State::MemoryAllocated {
+            panic!("Cannot change predictive mode after memory allocation");
+        }
+        self.predictive_enabled = enabled;
+    }
+
+    /// Returns whether PDCFR+ (Predictive Discounted CFR+) is enabled.
+    #[inline]
+    pub fn is_predictive_mode(&self) -> bool {
+        self.predictive_enabled
+    }
+
+    /// Copies current regrets to previous regrets storage for PDCFR+ prediction.
+    /// This is called at the start of each iteration by the solver.
+    fn save_regrets_for_prediction(&mut self) {
+        if !self.predictive_enabled || self.storage_prev.is_empty() {
+            return;
+        }
+
+        // Copy storage2 (current regrets) to storage_prev
+        self.storage_prev.copy_from_slice(&self.storage2);
+
+        // Also copy the scale factors for compressed mode
+        if self.is_compression_enabled {
+            for node in &self.node_arena {
+                let mut node = node.lock();
+                if !node.is_terminal() && !node.is_chance() && !node.storage4.is_null() {
+                    node.scale4 = node.scale2;
                 }
             }
         }

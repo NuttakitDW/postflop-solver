@@ -96,6 +96,20 @@ pub trait Game: Send + Sync {
     fn aggregate_regrets_by_cluster(&mut self) {
         // No-op by default
     }
+
+    /// Returns whether predictive CFR (PDCFR+) is enabled.
+    /// When enabled, regret matching uses predicted regrets: R_predict = 2*R_t - R_{t-1}
+    #[doc(hidden)]
+    fn is_predictive_enabled(&self) -> bool {
+        false
+    }
+
+    /// Copies current regrets to previous regrets storage.
+    /// This should be called at the start of each iteration when PDCFR+ is enabled.
+    #[doc(hidden)]
+    fn save_regrets_for_prediction(&mut self) {
+        // No-op by default
+    }
 }
 
 /// The trait representing a node in game tree.
@@ -310,5 +324,41 @@ pub trait GameNode: Send + Sync {
     #[doc(hidden)]
     fn enable_parallelization(&self) -> bool {
         false
+    }
+
+    /// Returns the previous iteration's cumulative regrets (for PDCFR+).
+    #[doc(hidden)]
+    fn prev_regrets(&self) -> &[f32] {
+        &[]
+    }
+
+    /// Returns the mutable reference to the previous iteration's cumulative regrets.
+    #[doc(hidden)]
+    fn prev_regrets_mut(&mut self) -> &mut [f32] {
+        unreachable!()
+    }
+
+    /// Returns the previous iteration's compressed cumulative regrets (for PDCFR+).
+    #[doc(hidden)]
+    fn prev_regrets_compressed(&self) -> &[i16] {
+        &[]
+    }
+
+    /// Returns the mutable reference to the previous iteration's compressed cumulative regrets.
+    #[doc(hidden)]
+    fn prev_regrets_compressed_mut(&mut self) -> &mut [i16] {
+        unreachable!()
+    }
+
+    /// Returns the scale of the previous iteration's compressed cumulative regrets.
+    #[doc(hidden)]
+    fn prev_regret_scale(&self) -> f32 {
+        0.0
+    }
+
+    /// Sets the scale of the previous iteration's compressed cumulative regrets.
+    #[doc(hidden)]
+    fn set_prev_regret_scale(&mut self, _scale: f32) {
+        unreachable!()
     }
 }

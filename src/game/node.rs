@@ -202,6 +202,44 @@ impl GameNode for PostFlopNode {
     fn enable_parallelization(&self) -> bool {
         true
     }
+
+    #[inline]
+    fn prev_regrets(&self) -> &[f32] {
+        if self.storage4.is_null() {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(self.storage4 as *const f32, self.num_elements as usize) }
+        }
+    }
+
+    #[inline]
+    fn prev_regrets_mut(&mut self) -> &mut [f32] {
+        unsafe { slice::from_raw_parts_mut(self.storage4 as *mut f32, self.num_elements as usize) }
+    }
+
+    #[inline]
+    fn prev_regrets_compressed(&self) -> &[i16] {
+        if self.storage4.is_null() {
+            &[]
+        } else {
+            unsafe { slice::from_raw_parts(self.storage4 as *const i16, self.num_elements as usize) }
+        }
+    }
+
+    #[inline]
+    fn prev_regrets_compressed_mut(&mut self) -> &mut [i16] {
+        unsafe { slice::from_raw_parts_mut(self.storage4 as *mut i16, self.num_elements as usize) }
+    }
+
+    #[inline]
+    fn prev_regret_scale(&self) -> f32 {
+        self.scale4
+    }
+
+    #[inline]
+    fn set_prev_regret_scale(&mut self, scale: f32) {
+        self.scale4 = scale;
+    }
 }
 
 impl Default for PostFlopNode {
@@ -220,10 +258,12 @@ impl Default for PostFlopNode {
             storage1: ptr::null_mut(),
             storage2: ptr::null_mut(),
             storage3: ptr::null_mut(),
+            storage4: ptr::null_mut(),
             num_elements: 0,
             scale1: 0.0,
             scale2: 0.0,
             scale3: 0.0,
+            scale4: 0.0,
         }
     }
 }

@@ -103,7 +103,11 @@ pub struct PostFlopGame {
     storage2: Vec<u8>,
     storage_ip: Vec<u8>,
     storage_chance: Vec<u8>,
+    storage_prev: Vec<u8>, // previous regrets for PDCFR+
     locking_strategy: BTreeMap<usize, Vec<f32>>,
+
+    // PDCFR+ (Predictive Discounted CFR+) settings
+    predictive_enabled: bool,
 
     // result interpreter
     action_history: Vec<usize>,
@@ -152,9 +156,11 @@ pub struct PostFlopNode {
     scale1: f32,
     scale2: f32,
     scale3: f32,
+    scale4: f32, // previous regrets scale for PDCFR+
     storage1: *mut u8, // strategy
     storage2: *mut u8, // regrets or cfvalues
     storage3: *mut u8, // IP cfvalues
+    storage4: *mut u8, // previous regrets for PDCFR+
 }
 
 unsafe impl Send for PostFlopNode {}
