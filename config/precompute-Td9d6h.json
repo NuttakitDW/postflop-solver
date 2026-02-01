@@ -1,0 +1,51 @@
+{
+  "board": {
+    "flop": "Td9d6h",
+    "turn": null,
+    "river": null
+  },
+  "ranges": {
+    "oop": "22+,A2s+,K2s+,Q2s+,J2s+,T2s+,92s+,82s+,72s+,62s+,52s+,42s+,32s,A2o+,K2o+,Q2o+,J2o+,T2o+,92o+,82o+,72o+,62o+,52o+,42o+,32o",
+    "ip": "22+,A2s+,K2s+,Q2s+,J2s+,T2s+,92s+,82s+,72s+,62s+,52s+,42s+,32s,A2o+,K2o+,Q2o+,J2o+,T2o+,92o+,82o+,72o+,62o+,52o+,42o+,32o"
+  },
+  "betSizes": {
+    "oopFlopBet": "33",
+    "oopFlopRaise": "60",
+    "oopTurnBet": "33, 75",
+    "oopTurnRaise": "60",
+    "oopTurnDonk": "",
+    "oopRiverBet": "33, 75",
+    "oopRiverRaise": "60",
+    "oopRiverDonk": "",
+    "ipFlopBet": "33, 75",
+    "ipFlopRaise": "60",
+    "ipTurnBet": "33, 75",
+    "ipTurnRaise": "60",
+    "ipRiverBet": "33, 75",
+    "ipRiverRaise": "60"
+  },
+  "tree": {
+    "startingPot": 100,
+    "effectiveStack": 200,
+    "rakePercent": 0.0,
+    "rakeCap": 0.0,
+    "donkOption": 0,
+    "addAllInThreshold": 150,
+    "forceAllInThreshold": 20,
+    "mergingThreshold": 10,
+    "maxRaisesPerStreet": 3
+  },
+  "solver": {
+    "maxIterations": 500,
+    "targetExploitabilityPercent": 0.5,
+    "useCompression": false,
+    "exportFlopOnly": false,
+    "warmStartFrom": null,
+    "saveRegretSnapshot": "out/Td9d6h-regrets.bin"
+  },
+  "output": {
+    "filename": "out/Td9d6h-precompute.flop",
+    "compressionLevel": 3,
+    "memo": "Precompute for Td9d6h - save regrets for warm start"
+  }
+}

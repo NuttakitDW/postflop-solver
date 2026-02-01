@@ -1,4 +1,5 @@
 mod base;
+pub mod cluster;
 mod evaluation;
 mod interpreter;
 mod node;
@@ -13,6 +14,10 @@ use crate::action_tree::*;
 use crate::card::*;
 use crate::mutex_like::*;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+#[cfg(feature = "bincode")]
+use crate::ev_map::EvMap;
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
@@ -82,6 +87,7 @@ pub struct PostFlopGame {
     // store options
     storage_mode: BoardState,
     target_storage_mode: BoardState,
+    solve_flop_only: bool,
     num_nodes: [u64; 3],
     is_compression_enabled: bool,
     num_storage: u64,
@@ -112,6 +118,19 @@ pub struct PostFlopGame {
     weights: [Vec<f32>; 2],
     normalized_weights: [Vec<f32>; 2],
     cfvalues_cache: [Vec<f32>; 2],
+
+    // flop-only cluster abstraction
+    // When enabled, hands are grouped into clusters based on equity distributions
+    // and solving happens at the cluster level for faster convergence
+    cluster_enabled: bool,
+    num_clusters: usize,
+    // Cluster assignment for each hand [player][hand_idx] -> cluster_id
+    cluster_assignments: [Vec<u16>; 2],
+
+    // EV Map for flop-only solving with precomputed leaf values
+    // When set, flop terminals use precomputed EVs instead of raw equity
+    #[cfg(feature = "bincode")]
+    ev_map: Option<Arc<EvMap>>,
 }
 
 /// A struct representing a node in a postflop game tree.

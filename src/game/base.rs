@@ -73,7 +73,11 @@ impl Game for PostFlopGame {
 
     #[inline]
     fn is_ready(&self) -> bool {
-        self.state == State::MemoryAllocated && self.storage_mode == BoardState::River
+        if self.solve_flop_only {
+            self.state == State::MemoryAllocated && self.storage_mode == BoardState::Flop
+        } else {
+            self.state == State::MemoryAllocated && self.storage_mode == BoardState::River
+        }
     }
 
     #[inline]
@@ -118,6 +122,16 @@ impl Game for PostFlopGame {
     #[inline]
     fn starting_pot(&self) -> i32 {
         self.tree_config.starting_pot
+    }
+
+    #[inline]
+    fn is_cluster_enabled(&self) -> bool {
+        self.cluster_enabled
+    }
+
+    #[inline]
+    fn aggregate_regrets_by_cluster(&mut self) {
+        PostFlopGame::aggregate_regrets_by_cluster(self);
     }
 }
 
@@ -326,22 +340,75 @@ impl PostFlopGame {
         }
     }
 
+    /// Enables flop-only solving mode (POC).
+    /// Must be called before `allocate_memory()`.
+    /// When enabled, the solver will only build and solve the flop portion of the tree.
+    #[inline]
+    pub fn set_solve_flop_only(&mut self, enabled: bool) {
+        if self.state >= State::MemoryAllocated {
+            panic!("Cannot change flop-only mode after memory allocation");
+        }
+        self.solve_flop_only = enabled;
+    }
+
+    /// Returns whether flop-only solving mode is enabled.
+    #[inline]
+    pub fn is_solve_flop_only(&self) -> bool {
+        self.solve_flop_only
+    }
+
+    /// Sets the EV map for flop-only solving with precomputed leaf values.
+    ///
+    /// When an EV map is set, flop terminals will use precomputed EVs from a full-tree solve
+    /// instead of raw equity calculations. This enables the "Perfect Leaf Evaluator" approach
+    /// where the solver uses precomputed future-street values.
+    ///
+    /// The EV map supports Range-Agnostic transfer via Equity-Ratio Scaling:
+    ///   EV_final = Precomputed_EV × (Current_Equity / Precomputed_Equity)
+    ///
+    /// This allows a 100bb SRP precompute to work for different ranges and bet sizes.
+    #[cfg(feature = "bincode")]
+    #[inline]
+    pub fn set_ev_map(&mut self, ev_map: Option<Arc<EvMap>>) {
+        self.ev_map = ev_map;
+    }
+
+    /// Returns a reference to the EV map, if set.
+    #[cfg(feature = "bincode")]
+    #[inline]
+    pub fn ev_map(&self) -> Option<&Arc<EvMap>> {
+        self.ev_map.as_ref()
+    }
+
     /// Allocates the memory.
     pub fn allocate_memory(&mut self, enable_compression: bool) {
         if self.state <= State::Uninitialized {
             panic!("Game is not successfully initialized");
         }
 
+        let target_mode = if self.solve_flop_only {
+            BoardState::Flop
+        } else {
+            BoardState::River
+        };
+
         if self.state == State::MemoryAllocated
-            && self.storage_mode == BoardState::River
+            && self.storage_mode == target_mode
             && self.is_compression_enabled == enable_compression
         {
             return;
         }
 
+        // For flop-only mode, recalculate storage requirements
+        let (num_storage, num_storage_ip, num_storage_chance) = if self.solve_flop_only {
+            self.calculate_flop_only_storage()
+        } else {
+            (self.num_storage, self.num_storage_ip, self.num_storage_chance)
+        };
+
         let num_bytes = if enable_compression { 2 } else { 4 };
-        if num_bytes * self.num_storage > isize::MAX as u64
-            || num_bytes * self.num_storage_chance > isize::MAX as u64
+        if num_bytes * num_storage > isize::MAX as u64
+            || num_bytes * num_storage_chance > isize::MAX as u64
         {
             panic!("Memory usage exceeds maximum size");
         }
@@ -351,19 +418,23 @@ impl PostFlopGame {
 
         self.clear_storage();
 
-        let storage_bytes = (num_bytes * self.num_storage) as usize;
-        let storage_ip_bytes = (num_bytes * self.num_storage_ip) as usize;
-        let storage_chance_bytes = (num_bytes * self.num_storage_chance) as usize;
+        let storage_bytes = (num_bytes * num_storage) as usize;
+        let storage_ip_bytes = (num_bytes * num_storage_ip) as usize;
+        let storage_chance_bytes = (num_bytes * num_storage_chance) as usize;
 
         self.storage1 = vec![0; storage_bytes];
         self.storage2 = vec![0; storage_bytes];
         self.storage_ip = vec![0; storage_ip_bytes];
         self.storage_chance = vec![0; storage_chance_bytes];
 
-        self.allocate_memory_nodes();
+        if self.solve_flop_only {
+            self.allocate_memory_nodes_flop_only();
+        } else {
+            self.allocate_memory_nodes();
+        }
 
-        self.storage_mode = BoardState::River;
-        self.target_storage_mode = BoardState::River;
+        self.storage_mode = target_mode;
+        self.target_storage_mode = target_mode;
     }
 
     /// Checks the card configuration.
@@ -1457,6 +1528,389 @@ impl PostFlopGame {
                 }
                 action_counter += num_bytes * node.num_elements as usize;
                 ip_counter += num_bytes * node.num_elements_ip as usize;
+            }
+        }
+    }
+
+    /// Calculate storage requirements for flop-only mode.
+    fn calculate_flop_only_storage(&self) -> (u64, u64, u64) {
+        let mut num_storage = 0u64;
+        let mut num_storage_ip = 0u64;
+        let num_storage_chance = 0u64; // No chance nodes in flop-only
+
+        // Only count flop nodes (turn == NOT_DEALT)
+        for node in &self.node_arena {
+            let node = node.lock();
+            // Skip if not a flop node
+            if node.turn != NOT_DEALT {
+                continue;
+            }
+            // Skip terminals and chance nodes
+            if node.is_terminal() || node.is_chance() {
+                continue;
+            }
+            num_storage += node.num_elements as u64;
+            num_storage_ip += node.num_elements_ip as u64;
+        }
+
+        (num_storage, num_storage_ip, num_storage_chance)
+    }
+
+    /// Allocates memory for flop-only mode.
+    fn allocate_memory_nodes_flop_only(&mut self) {
+        let num_bytes = if self.is_compression_enabled { 2 } else { 4 };
+        let mut action_counter = 0;
+        let mut ip_counter = 0;
+
+        for node in &self.node_arena {
+            let mut node = node.lock();
+            // Skip if not a flop node
+            if node.turn != NOT_DEALT {
+                continue;
+            }
+            // Skip existing terminals
+            if node.is_terminal() {
+                continue;
+            }
+            // In flop-only mode, chance nodes (turn deal) become equity terminals
+            if node.is_chance() {
+                // Mark as terminal (keeping the previous player info for evaluation)
+                let prev_player = node.player & PLAYER_MASK;
+                node.player = PLAYER_TERMINAL_FLAG | prev_player;
+                continue;
+            }
+            unsafe {
+                let ptr1 = self.storage1.as_mut_ptr();
+                let ptr2 = self.storage2.as_mut_ptr();
+                let ptr3 = self.storage_ip.as_mut_ptr();
+                node.storage1 = ptr1.add(action_counter);
+                node.storage2 = ptr2.add(action_counter);
+                node.storage3 = ptr3.add(ip_counter);
+            }
+            action_counter += num_bytes * node.num_elements as usize;
+            ip_counter += num_bytes * node.num_elements_ip as usize;
+        }
+    }
+
+    /// Returns whether flop-only mode is enabled (for use in evaluation).
+    #[inline]
+    pub(super) fn is_flop_only_mode(&self) -> bool {
+        self.solve_flop_only
+    }
+
+    /// Returns a reference to the node arena (for regret snapshot extraction).
+    #[inline]
+    pub fn node_arena(&self) -> &[MutexLike<PostFlopNode>] {
+        &self.node_arena
+    }
+
+    /// Enables cluster-based solving for flop-only mode.
+    /// When enabled, hands are grouped into clusters based on equity distributions
+    /// and regrets are aggregated at the cluster level after each iteration.
+    /// Must be called after `update_config()` and before `allocate_memory()`.
+    ///
+    /// # Arguments
+    /// * `num_clusters` - Number of clusters to use (default: 50)
+    #[inline]
+    pub fn set_cluster_abstraction(&mut self, num_clusters: usize) -> Result<(), String> {
+        if self.state < State::TreeBuilt {
+            return Err("Game is not successfully initialized".to_string());
+        }
+        if self.state >= State::MemoryAllocated {
+            return Err("Cannot enable clustering after memory allocation".to_string());
+        }
+        if !self.solve_flop_only {
+            return Err("Cluster abstraction requires flop-only mode".to_string());
+        }
+
+        self.num_clusters = num_clusters;
+        self.compute_clusters()?;
+        self.cluster_enabled = true;
+
+        Ok(())
+    }
+
+    /// Returns whether cluster abstraction is enabled.
+    #[inline]
+    pub fn is_cluster_enabled(&self) -> bool {
+        self.cluster_enabled
+    }
+
+    /// Returns the number of clusters used.
+    #[inline]
+    pub fn num_clusters(&self) -> usize {
+        self.num_clusters
+    }
+
+    /// Returns cluster assignments for a player.
+    #[inline]
+    pub fn cluster_assignments(&self, player: usize) -> &[u16] {
+        &self.cluster_assignments[player]
+    }
+
+    /// Computes cluster assignments for all hands based on equity distributions.
+    fn compute_clusters(&mut self) -> Result<(), String> {
+        use super::cluster::{kmeans_cluster, EquityDistribution, DEFAULT_NUM_CLUSTERS};
+
+        let num_clusters = if self.num_clusters == 0 {
+            DEFAULT_NUM_CLUSTERS
+        } else {
+            self.num_clusters
+        };
+
+        let flop = self.card_config.flop;
+        let flop_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
+
+        // Compute equity distributions for each player
+        for player in 0..2 {
+            let player_cards = &self.private_cards[player];
+            let opponent_cards = &self.private_cards[player ^ 1];
+            let num_hands = player_cards.len();
+
+            // Build equity distributions for each hand
+            let mut distributions: Vec<EquityDistribution> = Vec::with_capacity(num_hands);
+
+            for (hand_idx, &(c1, c2)) in player_cards.iter().enumerate() {
+                let hand_mask: u64 = (1 << c1) | (1 << c2);
+                let mut dist = EquityDistribution::new();
+
+                // Iterate over all turn/river runouts
+                for turn in 0u8..52 {
+                    let turn_mask = 1u64 << turn;
+                    if turn_mask & (flop_mask | hand_mask) != 0 {
+                        continue;
+                    }
+
+                    for river in 0u8..52 {
+                        let river_mask = 1u64 << river;
+                        if river_mask & (flop_mask | turn_mask | hand_mask) != 0 {
+                            continue;
+                        }
+
+                        let board_mask = flop_mask | turn_mask | river_mask;
+                        let pair_index = card_pair_to_index(turn, river);
+
+                        // Get hand strength data for this runout
+                        let hand_strength = &self.hand_strength[pair_index];
+                        if hand_strength[player].is_empty() {
+                            continue;
+                        }
+
+                        // Find player's hand strength on this runout
+                        let player_strength_list = &hand_strength[player];
+                        let opponent_strength_list = &hand_strength[player ^ 1];
+
+                        // Find player's strength
+                        let player_strength = player_strength_list[1..player_strength_list.len() - 1]
+                            .iter()
+                            .find(|item| item.index == hand_idx as u16)
+                            .map(|item| item.strength);
+
+                        if let Some(my_strength) = player_strength {
+                            // Count wins, ties, losses against opponent range
+                            let mut wins = 0u32;
+                            let mut ties = 0u32;
+                            let mut losses = 0u32;
+
+                            for opp_item in &opponent_strength_list[1..opponent_strength_list.len() - 1]
+                            {
+                                let (oc1, oc2) = opponent_cards[opp_item.index as usize];
+                                let opp_hand_mask = (1u64 << oc1) | (1u64 << oc2);
+                                if opp_hand_mask & (board_mask | hand_mask) != 0 {
+                                    continue;
+                                }
+
+                                if opp_item.strength < my_strength {
+                                    wins += 1;
+                                } else if opp_item.strength == my_strength {
+                                    ties += 1;
+                                } else {
+                                    losses += 1;
+                                }
+                            }
+
+                            let total = wins + ties + losses;
+                            if total > 0 {
+                                // Equity = (wins + 0.5 * ties) / total
+                                let equity =
+                                    (wins as f32 + 0.5 * ties as f32) / total as f32;
+                                dist.add_sample(equity);
+                            }
+                        }
+                    }
+                }
+
+                dist.normalize();
+                distributions.push(dist);
+            }
+
+            // Run K-Means clustering
+            let k = num_clusters.min(num_hands);
+            let (assignments, _centroids) = kmeans_cluster(&distributions, k, 50);
+
+            // Convert to u16 and store
+            self.cluster_assignments[player] = assignments.into_iter().map(|a| a as u16).collect();
+        }
+
+        self.num_clusters = num_clusters;
+        Ok(())
+    }
+
+    /// Aggregates regrets by cluster for flop-only mode.
+    /// This should be called after each DCFR iteration when cluster abstraction is enabled.
+    /// It averages regrets for hands in the same cluster, making their strategies converge.
+    pub fn aggregate_regrets_by_cluster(&mut self) {
+        if !self.cluster_enabled || self.state < State::MemoryAllocated {
+            return;
+        }
+
+        // Clone assignments to avoid borrow conflicts
+        let assignments_oop = self.cluster_assignments[0].clone();
+        let assignments_ip = self.cluster_assignments[1].clone();
+        let num_clusters = self.num_clusters;
+        let is_compression = self.is_compression_enabled;
+
+        // Process each node in the arena that is a flop action node
+        for i in 0..self.node_arena.len() {
+            let (player, num_actions, num_hands) = {
+                let node = self.node_arena[i].lock();
+
+                // Skip if not a flop node, terminal, or chance
+                if node.turn != NOT_DEALT || node.is_terminal() || node.is_chance() {
+                    continue;
+                }
+
+                let player = node.player as usize;
+                let num_actions = node.num_actions();
+                let num_hands = self.num_private_hands(player);
+
+                if num_hands == 0 || num_actions == 0 {
+                    continue;
+                }
+
+                (player, num_actions, num_hands)
+            };
+
+            let assignments = if player == 0 { &assignments_oop } else { &assignments_ip };
+            if assignments.is_empty() {
+                continue;
+            }
+
+            // Aggregate regrets by cluster
+            if is_compression {
+                self.aggregate_regrets_compressed_internal(i, num_actions, num_hands, assignments, num_clusters);
+            } else {
+                self.aggregate_regrets_uncompressed_internal(i, num_actions, num_hands, assignments, num_clusters);
+            }
+        }
+    }
+
+    /// Helper function to aggregate uncompressed regrets by cluster.
+    fn aggregate_regrets_uncompressed_internal(
+        &mut self,
+        node_index: usize,
+        num_actions: usize,
+        num_hands: usize,
+        assignments: &[u16],
+        num_clusters: usize,
+    ) {
+        let mut node = self.node_arena[node_index].lock();
+        let regrets = node.regrets_mut();
+
+        if regrets.is_empty() {
+            return;
+        }
+
+        // For each action, aggregate regrets by cluster
+        for action in 0..num_actions {
+            let action_offset = action * num_hands;
+
+            // Compute sum and count for each cluster
+            let mut cluster_sums: Vec<f64> = vec![0.0; num_clusters];
+            let mut cluster_counts: Vec<u32> = vec![0; num_clusters];
+
+            for (hand_idx, &cluster_id) in assignments.iter().enumerate() {
+                let cluster = cluster_id as usize;
+                if cluster < num_clusters {
+                    cluster_sums[cluster] += regrets[action_offset + hand_idx] as f64;
+                    cluster_counts[cluster] += 1;
+                }
+            }
+
+            // Compute cluster averages
+            let cluster_avgs: Vec<f32> = cluster_sums
+                .iter()
+                .zip(&cluster_counts)
+                .map(|(&sum, &count)| {
+                    if count > 0 {
+                        (sum / count as f64) as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+
+            // Apply cluster averages back to all hands
+            for (hand_idx, &cluster_id) in assignments.iter().enumerate() {
+                let cluster = cluster_id as usize;
+                if cluster < num_clusters {
+                    regrets[action_offset + hand_idx] = cluster_avgs[cluster];
+                }
+            }
+        }
+    }
+
+    /// Helper function to aggregate compressed regrets by cluster.
+    fn aggregate_regrets_compressed_internal(
+        &mut self,
+        node_index: usize,
+        num_actions: usize,
+        num_hands: usize,
+        assignments: &[u16],
+        num_clusters: usize,
+    ) {
+        let mut node = self.node_arena[node_index].lock();
+        let regrets = node.regrets_compressed_mut();
+
+        if regrets.is_empty() {
+            return;
+        }
+
+        // For each action, aggregate regrets by cluster
+        for action in 0..num_actions {
+            let action_offset = action * num_hands;
+
+            // Compute sum and count for each cluster (in scaled space)
+            let mut cluster_sums: Vec<f64> = vec![0.0; num_clusters];
+            let mut cluster_counts: Vec<u32> = vec![0; num_clusters];
+
+            for (hand_idx, &cluster_id) in assignments.iter().enumerate() {
+                let cluster = cluster_id as usize;
+                if cluster < num_clusters {
+                    cluster_sums[cluster] += regrets[action_offset + hand_idx] as f64;
+                    cluster_counts[cluster] += 1;
+                }
+            }
+
+            // Compute cluster averages
+            let cluster_avgs: Vec<i16> = cluster_sums
+                .iter()
+                .zip(&cluster_counts)
+                .map(|(&sum, &count)| {
+                    if count > 0 {
+                        (sum / count as f64).round() as i16
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+
+            // Apply cluster averages back to all hands
+            for (hand_idx, &cluster_id) in assignments.iter().enumerate() {
+                let cluster = cluster_id as usize;
+                if cluster < num_clusters {
+                    regrets[action_offset + hand_idx] = cluster_avgs[cluster];
+                }
             }
         }
     }

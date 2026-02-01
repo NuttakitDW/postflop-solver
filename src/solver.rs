@@ -169,6 +169,14 @@ pub fn solve<T: Game>(
             );
         }
 
+        // Aggregate regrets by cluster if cluster abstraction is enabled
+        // Note: We need to drop root first to release the borrow before calling mutable method
+        if game.is_cluster_enabled() {
+            drop(root);
+            game.aggregate_regrets_by_cluster();
+            root = game.root();
+        }
+
         // Log root node scale factors and regret stats after update (compression only)
         #[cfg(feature = "logging")]
         {

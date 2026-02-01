@@ -70,12 +70,20 @@ mod hand_table;
 mod interface;
 mod mutex_like;
 mod range;
+#[cfg(feature = "bincode")]
+mod ev_map;
+#[cfg(feature = "bincode")]
+mod regret_snapshot;
 mod sliceop;
 mod solver;
 mod utility;
 
 #[cfg(feature = "bincode")]
 pub use file::*;
+#[cfg(feature = "bincode")]
+pub use regret_snapshot::*;
+#[cfg(feature = "bincode")]
+pub use ev_map::*;
 
 pub use action_tree::*;
 pub use bet_size::*;

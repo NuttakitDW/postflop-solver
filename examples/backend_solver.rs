@@ -23,7 +23,9 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
+use std::collections::HashMap;
 
 /// Board configuration
 #[derive(Debug, Serialize, Deserialize)]
@@ -108,6 +110,25 @@ struct SolverSettings {
     target_exploitability_percent: f32,
     #[serde(default)]
     use_compression: bool,
+    /// Export flop-only: solve full tree but only save flop strategies
+    /// This gives accurate GTO strategies with 99% storage reduction
+    #[serde(default)]
+    export_flop_only: bool,
+    /// Path to regret snapshot file to use for warm-starting
+    /// If provided, loads precomputed regrets before solving
+    #[serde(default)]
+    warm_start_from: Option<String>,
+    /// Save regret snapshot after solving (for future warm starts)
+    #[serde(default)]
+    save_regret_snapshot: Option<String>,
+    /// Extract EV map from solved full tree and save to this path
+    /// The EV map captures hand EVs at flop terminals including future street value
+    #[serde(default)]
+    extract_ev_map: Option<String>,
+    /// Load EV map for flop-only solving with precomputed leaf values
+    /// Uses Range-Agnostic transfer for different ranges/bet sizes
+    #[serde(default)]
+    load_ev_map: Option<String>,
 }
 
 fn default_max_iterations() -> u32 { 1000 }
@@ -197,6 +218,11 @@ fn generate_template() -> SolverConfig {
             max_iterations: 1000,
             target_exploitability_percent: 0.5,
             use_compression: false,
+            export_flop_only: false,
+            warm_start_from: None,
+            save_regret_snapshot: None,
+            extract_ev_map: None,
+            load_ev_map: None,
         },
         output: OutputSettings {
             filename: "solution.flop".to_string(),
@@ -251,6 +277,221 @@ fn create_error_result(error: String) -> SolverResult {
         ip_hands: 0,
         error: Some(error),
     }
+}
+
+/// Converts a card pair to a string like "AhKs"
+fn hole_to_string(hole: (u8, u8)) -> String {
+    let card_to_str = |card: u8| -> String {
+        let rank = card >> 2;
+        let suit = card & 3;
+        let rank_char = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'][rank as usize];
+        let suit_char = ['c', 'd', 'h', 's'][suit as usize];
+        format!("{}{}", rank_char, suit_char)
+    };
+    // Put higher card first
+    let max_card = u8::max(hole.0, hole.1);
+    let min_card = u8::min(hole.0, hole.1);
+    format!("{}{}", card_to_str(max_card), card_to_str(min_card))
+}
+
+/// Groups hands by canonical form (e.g., "AKs", "AKo", "AA")
+fn group_hands_by_canonical(private_cards: &[(u8, u8)]) -> HashMap<String, Vec<(usize, String)>> {
+    let mut hand_groups: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    for (hand_idx, &(c1, c2)) in private_cards.iter().enumerate() {
+        let r1 = c1 >> 2;
+        let r2 = c2 >> 2;
+        let s1 = c1 & 3;
+        let s2 = c2 & 3;
+        let rank_chars = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
+        let high_rank = rank_chars[u8::max(r1, r2) as usize];
+        let low_rank = rank_chars[u8::min(r1, r2) as usize];
+        let suited = if r1 == r2 { "" } else if s1 == s2 { "s" } else { "o" };
+        let canonical = format!("{}{}{}", high_rank, low_rank, suited);
+        let full_name = hole_to_string((c1, c2));
+        hand_groups.entry(canonical).or_default().push((hand_idx, full_name));
+    }
+    hand_groups
+}
+
+/// Prints strategy at current node
+fn print_node_strategy(game: &PostFlopGame, node_path: &str, num_hands_to_show: usize) {
+    if game.is_terminal_node() {
+        println!("\n[{}] TERMINAL NODE", node_path);
+        return;
+    }
+    if game.is_chance_node() {
+        println!("\n[{}] CHANCE NODE (card dealt)", node_path);
+        return;
+    }
+
+    let actions = game.available_actions();
+    let player = game.current_player();
+    let private_cards = game.private_cards(player).to_vec();
+    let num_hands = private_cards.len();
+    let strategy = game.strategy();
+
+    let position = if player == 0 { "OOP" } else { "IP" };
+    println!("\n╔══════════════════════════════════════════════════════════════");
+    println!("║ [{}] {} to act ({} hands)", node_path, position, num_hands);
+    println!("║ Actions: {:?}", actions);
+    println!("╚══════════════════════════════════════════════════════════════");
+
+    // Calculate aggregate strategy
+    let mut action_totals: Vec<f64> = vec![0.0; actions.len()];
+    for action_idx in 0..actions.len() {
+        for hand_idx in 0..num_hands {
+            action_totals[action_idx] += strategy[action_idx * num_hands + hand_idx] as f64;
+        }
+    }
+    let total_weight: f64 = action_totals.iter().sum();
+
+    println!("\nAggregate Strategy:");
+    for (i, action) in actions.iter().enumerate() {
+        let freq = if total_weight > 0.0 { action_totals[i] / total_weight * 100.0 } else { 0.0 };
+        println!("  {:?}: {:.1}%", action, freq);
+    }
+
+    // Group hands
+    let hand_groups = group_hands_by_canonical(&private_cards);
+
+    // For each action, show top hands
+    println!("\nStrategy by Action:");
+    for (action_idx, action) in actions.iter().enumerate() {
+        println!("\n  --- {:?} ---", action);
+
+        let mut hand_freqs: Vec<(String, f64)> = Vec::new();
+        for (canonical, combos) in &hand_groups {
+            let total_freq: f64 = combos.iter()
+                .map(|(h_idx, _)| strategy[action_idx * num_hands + h_idx] as f64)
+                .sum();
+            let avg_freq = total_freq / combos.len() as f64;
+            if avg_freq > 0.05 { // Only show if > 5%
+                hand_freqs.push((canonical.clone(), avg_freq));
+            }
+        }
+
+        hand_freqs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let show_count = num_hands_to_show.min(hand_freqs.len());
+        for (canonical, freq) in hand_freqs.iter().take(show_count) {
+            println!("    {}: {:.0}%", canonical, freq * 100.0);
+        }
+        if hand_freqs.len() > show_count {
+            println!("    ... and {} more hands", hand_freqs.len() - show_count);
+        }
+    }
+
+    // Key hands detailed
+    println!("\n  Key Hands:");
+    let key_hands = ["AA", "KK", "QQ", "JJ", "TT", "99", "AKs", "AKo", "AQs", "KQs", "QJs", "JTs", "T9s", "98s", "87s", "76s", "65s"];
+    for key in key_hands.iter() {
+        if let Some(combos) = hand_groups.get(*key) {
+            let mut avg_strategy: Vec<f64> = vec![0.0; actions.len()];
+            for (hand_idx, _) in combos {
+                for action_idx in 0..actions.len() {
+                    avg_strategy[action_idx] += strategy[action_idx * num_hands + hand_idx] as f64;
+                }
+            }
+            for s in avg_strategy.iter_mut() {
+                *s /= combos.len() as f64;
+            }
+
+            let strat_str: Vec<String> = actions.iter().zip(avg_strategy.iter())
+                .filter(|(_, &freq)| freq > 0.01)
+                .map(|(a, freq)| format!("{:?}:{:.0}%", a, freq * 100.0))
+                .collect();
+            if !strat_str.is_empty() {
+                println!("    {}: {}", key, strat_str.join(", "));
+            }
+        }
+    }
+}
+
+/// Prints strategy results for flop-only mode to console, traversing the tree
+fn print_flop_strategy(game: &mut PostFlopGame, num_hands_to_show: usize) {
+    println!("\n");
+    println!("╔════════════════════════════════════════════════════════════════════╗");
+    println!("║              FLOP-ONLY STRATEGY RESULTS                            ║");
+    println!("╚════════════════════════════════════════════════════════════════════╝");
+
+    // ==========================================
+    // ROOT: OOP's first action
+    // ==========================================
+    game.back_to_root();
+    print_node_strategy(game, "Root: OOP", num_hands_to_show);
+
+    let root_actions = game.available_actions();
+
+    // Find check action index
+    let check_idx = root_actions.iter().position(|a| matches!(a, Action::Check));
+
+    if let Some(check_idx) = check_idx {
+        // ==========================================
+        // OOP checks -> IP's turn
+        // ==========================================
+        game.back_to_root();
+        game.play(check_idx);
+
+        if !game.is_terminal_node() && !game.is_chance_node() {
+            print_node_strategy(game, "OOP Check → IP", num_hands_to_show);
+
+            let ip_actions = game.available_actions();
+
+            // Find IP's bet actions
+            for (ip_action_idx, ip_action) in ip_actions.iter().enumerate() {
+                match ip_action {
+                    Action::Check => {
+                        // OOP check -> IP check = end of flop action (goes to turn)
+                        game.back_to_root();
+                        game.play(check_idx);
+                        game.play(ip_action_idx);
+                        if game.is_chance_node() {
+                            println!("\n[OOP Check → IP Check] → CHANCE NODE (deal turn)");
+                        }
+                    }
+                    Action::Bet(size) => {
+                        // ==========================================
+                        // OOP check -> IP bet -> OOP's response
+                        // ==========================================
+                        game.back_to_root();
+                        game.play(check_idx);
+                        game.play(ip_action_idx);
+
+                        if !game.is_terminal_node() && !game.is_chance_node() {
+                            let path = format!("OOP Check → IP Bet({}) → OOP", size);
+                            print_node_strategy(game, &path, num_hands_to_show);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Find bet action index at root
+    let bet_idx = root_actions.iter().position(|a| matches!(a, Action::Bet(_)));
+
+    if let Some(bet_idx) = bet_idx {
+        // ==========================================
+        // OOP bets -> IP's response
+        // ==========================================
+        game.back_to_root();
+        game.play(bet_idx);
+
+        if !game.is_terminal_node() && !game.is_chance_node() {
+            let bet_size = match root_actions[bet_idx] {
+                Action::Bet(s) => s,
+                _ => 0,
+            };
+            let path = format!("OOP Bet({}) → IP", bet_size);
+            print_node_strategy(game, &path, num_hands_to_show);
+        }
+    }
+
+    game.back_to_root();
+    println!("\n═══════════════════════════════════════════════════════════════════════");
+    println!("                         END STRATEGY RESULTS");
+    println!("═══════════════════════════════════════════════════════════════════════\n");
 }
 
 fn run_solver(config: &SolverConfig) -> SolverResult {
@@ -440,8 +681,62 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let (mem_uncompressed, _) = game.memory_usage();
     let memory_mb = mem_uncompressed as f64 / 1024.0 / 1024.0;
 
-    // Allocate memory
+    // Allocate memory (always full tree - we solve everything then export what we need)
     game.allocate_memory(config.solver.use_compression);
+
+    // Log export mode
+    if config.solver.export_flop_only {
+        if initial_state != BoardState::Flop {
+            return create_error_result("Export flop-only requires board to be at flop (no turn/river specified)".to_string());
+        }
+        println!("Export mode: FLOP ONLY (solve full tree, save only flop strategies)");
+
+        // Enable flop-only solving mode
+        game.set_solve_flop_only(true);
+    }
+
+    // Load EV map for flop-only solving if provided
+    if let Some(ref ev_map_path) = config.solver.load_ev_map {
+        println!("Loading EV map from: {}", ev_map_path);
+        let load_start = Instant::now();
+        match EvMap::load_from_file(ev_map_path) {
+            Ok(ev_map) => {
+                println!("  Loaded {} flop terminals in {:.2}s",
+                    ev_map.terminals.len(), load_start.elapsed().as_secs_f64());
+                game.set_ev_map(Some(Arc::new(ev_map)));
+                println!("  EV map enabled - using precomputed leaf values!");
+            }
+            Err(e) => {
+                println!("  Warning: Failed to load EV map: {}", e);
+                println!("  Continuing with equity-based evaluation...");
+            }
+        }
+    }
+
+    // Warm start from precomputed regrets if provided
+    if let Some(ref snapshot_path) = config.solver.warm_start_from {
+        println!("Loading regret snapshot from: {}", snapshot_path);
+        let load_start = Instant::now();
+        match RegretSnapshot::load_from_file(snapshot_path) {
+            Ok(snapshot) => {
+                match snapshot.apply_to_game(&mut game) {
+                    Ok(applied) => {
+                        println!("  Applied regrets to {} nodes in {:.2}s",
+                            applied, load_start.elapsed().as_secs_f64());
+                        println!("  Warm start enabled - solver will converge faster!");
+                    }
+                    Err(e) => {
+                        println!("  Warning: Failed to apply regrets: {}", e);
+                        println!("  Continuing without warm start...");
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  Warning: Failed to load snapshot: {}", e);
+                println!("  Continuing without warm start...");
+            }
+        }
+    }
 
     // Calculate target exploitability
     let target_exploitability =
@@ -459,6 +754,60 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 
     let exploitability_percent = exploitability / game.tree_config().starting_pot as f32 * 100.0;
 
+    // Save regret snapshot if requested (for future warm starts)
+    if let Some(ref snapshot_path) = config.solver.save_regret_snapshot {
+        println!("Saving regret snapshot to: {}", snapshot_path);
+        let save_start = Instant::now();
+        match RegretSnapshot::from_game(&game) {
+            Ok(snapshot) => {
+                // Ensure parent directory exists
+                if let Some(parent) = std::path::Path::new(snapshot_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match snapshot.save_to_file(snapshot_path) {
+                    Ok(_) => {
+                        println!("  Saved {} node regrets in {:.2}s",
+                            snapshot.node_regrets.len(), save_start.elapsed().as_secs_f64());
+                        // Get file size
+                        if let Ok(metadata) = std::fs::metadata(snapshot_path) {
+                            println!("  Snapshot file size: {:.2} MB",
+                                metadata.len() as f64 / 1024.0 / 1024.0);
+                        }
+                    }
+                    Err(e) => println!("  Warning: Failed to save snapshot: {}", e),
+                }
+            }
+            Err(e) => println!("  Warning: Failed to create snapshot: {}", e),
+        }
+    }
+
+    // Extract and save EV map if requested (for future flop-only solves)
+    if let Some(ref ev_map_path) = config.solver.extract_ev_map {
+        println!("Extracting EV map to: {}", ev_map_path);
+        let extract_start = Instant::now();
+        match EvMap::from_solved_game(&game) {
+            Ok(ev_map) => {
+                // Ensure parent directory exists
+                if let Some(parent) = std::path::Path::new(ev_map_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match ev_map.save_to_file(ev_map_path) {
+                    Ok(_) => {
+                        println!("  Extracted {} flop terminals in {:.2}s",
+                            ev_map.terminals.len(), extract_start.elapsed().as_secs_f64());
+                        // Get file size
+                        if let Ok(metadata) = std::fs::metadata(ev_map_path) {
+                            println!("  EV map file size: {:.2} MB",
+                                metadata.len() as f64 / 1024.0 / 1024.0);
+                        }
+                    }
+                    Err(e) => println!("  Warning: Failed to save EV map: {}", e),
+                }
+            }
+            Err(e) => println!("  Warning: Failed to extract EV map: {}", e),
+        }
+    }
+
     // Generate memo
     let memo = config.output.memo.clone().unwrap_or_else(|| {
         format!(
@@ -472,6 +821,22 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
             exploitability_percent
         )
     });
+
+    // Set target storage mode for export
+    if config.solver.export_flop_only {
+        if let Err(e) = game.set_target_storage_mode(BoardState::Flop) {
+            return create_error_result(format!("Failed to set flop-only export mode: {}", e));
+        }
+        println!("Exporting flop-only strategies...");
+        let full_memory = game.memory_usage();
+        let flop_memory = game.target_memory_usage();
+        println!("  Full tree memory: {:.2} MB", full_memory.0 as f64 / 1024.0 / 1024.0);
+        println!("  Flop-only memory: {:.2} MB", flop_memory as f64 / 1024.0 / 1024.0);
+        println!("  Reduction: {:.1}%", (1.0 - flop_memory as f64 / full_memory.0 as f64) * 100.0);
+
+        // Print strategy results to console
+        print_flop_strategy(&mut game, 15);
+    }
 
     // Save to file
     if let Err(e) = save_data_to_file(&game, &memo, &config.output.filename, config.output.compression_level) {

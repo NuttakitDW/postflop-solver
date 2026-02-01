@@ -1,0 +1,49 @@
+{
+  "board": {
+    "flop": "Td9d6h",
+    "turn": null,
+    "river": null
+  },
+  "ranges": {
+    "oop": "66:0.09,55:0.765,44:0.91,33:0.715,22:0.525,ATs-A2s,AJo:0.236,ATo:0.135,A9o:0.78,A8o:0.98,A7o:0.705,A6o:0.74,A5o:0.675,A4o:0.7,A3o:0.835,A2o:0.655,KJs:0.32,KTs-K2s,KQo:0.555,KJo:0.76,KTo:0.825,K9o:0.975,K8o:0.985,K7o:0.665,K6o:0.47,K5o:0.73,K4o-K3o:0.975,K2o,QJs:0.99,QTs-Q6s,Q5s:0.495,Q4s,Q3s:0.925,Q2s,QJo:0.73,QTo:0.89500004,Q9o:0.865,Q8o:0.84,Q7o:0.905,Q6o:0.67,Q5o:0.9,Q4o:0.97,Q3o,Q2o:0.875,J8s+,J7s:0.395,J6s-J2s,JTo:0.98,J9o:0.815,J8o:0.77,J7o:0.99,J6o-J5o,J4o:0.645,T8s+,T7s:0.35,T6s:0.365,T5s-T2s,T9o:0.785,T8o:0.76,T7o:0.985,T6o,98s:0.36,97s:0.325,96s:0.47,95s-92s,98o:0.92,97o-96o,87s:0.475,86s:0.52,85s-82s,86o+,76s:0.71,75s-72s,75o+,62s+,65o,64o:0.995,52s+,53o+,42s+,43o:0.255,32s",
+    "ip": "22+,A2+,K2s+,K6o+,K5o:0.36,Q2s+,Q8o+,Q7o:0.97,J2s+,J8o+,T3s+,T8o+,T7o:0.36,95s+,98o,97o:0.52,85s+,87o,74s+,64s+,53s+"
+  },
+  "betSizes": {
+    "oopFlopBet": "33",
+    "oopFlopRaise": "33, 60",
+    "oopTurnBet": "33, 2e, 75, 125",
+    "oopTurnRaise": "33, 60",
+    "oopTurnDonk": "33, 60",
+    "oopRiverBet": "33, 2e, 75, 125",
+    "oopRiverRaise": "33, 60",
+    "oopRiverDonk": "33, 60",
+    "ipFlopBet": "25, 55, 85, 125",
+    "ipFlopRaise": "33, 60",
+    "ipTurnBet": "33, 2e, 75, 125",
+    "ipTurnRaise": "33, 60",
+    "ipRiverBet": "55, 2e, 75, 125",
+    "ipRiverRaise": "33, 60"
+  },
+  "tree": {
+    "startingPot": 61,
+    "effectiveStack": 477,
+    "rakePercent": 0.0,
+    "rakeCap": 0.0,
+    "donkOption": 0,
+    "addAllInThreshold": 600,
+    "forceAllInThreshold": 50,
+    "mergingThreshold": 10,
+    "maxRaisesPerStreet": 4
+  },
+  "solver": {
+    "maxIterations": 1000,
+    "targetExploitabilityPercent": 0.3,
+    "useCompression": true,
+    "exportFlopOnly": true
+  },
+  "output": {
+    "filename": "out/50bb-medium-flop-only.flop",
+    "compressionLevel": 10,
+    "memo": "50bb flop-only POC"
+  }
+}

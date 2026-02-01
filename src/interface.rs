@@ -83,6 +83,19 @@ pub trait Game: Send + Sync {
     fn starting_pot(&self) -> i32 {
         0
     }
+
+    /// Returns whether cluster abstraction is enabled.
+    #[doc(hidden)]
+    fn is_cluster_enabled(&self) -> bool {
+        false
+    }
+
+    /// Aggregates regrets by cluster for cluster-based solving.
+    /// This is a no-op for games that don't support clustering.
+    #[doc(hidden)]
+    fn aggregate_regrets_by_cluster(&mut self) {
+        // No-op by default
+    }
 }
 
 /// The trait representing a node in game tree.

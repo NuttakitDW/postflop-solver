@@ -3,6 +3,9 @@ use crate::card::NOT_DEALT;
 use crate::sliceop::*;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "bincode")]
+use crate::ev_map::EvMap;
+
 #[inline]
 fn min(x: f64, y: f64) -> f64 {
     if x < y {
@@ -90,6 +93,22 @@ impl PostFlopGame {
                         - *cfreach_minus.get_unchecked(c2 as usize);
                     *result.get_unchecked_mut(i as usize) = (payoff * cfreach) as f32;
                 }
+            }
+        }
+        // equity terminal (flop-only mode: non-fold terminal at flop level)
+        // Uses EV map if available, otherwise computes equity by averaging showdown results
+        else if node.turn == NOT_DEALT && self.is_flop_only_mode() {
+            #[cfg(feature = "bincode")]
+            {
+                if self.ev_map.is_some() {
+                    self.evaluate_with_ev_map(result, node, player, cfreach);
+                } else {
+                    self.evaluate_flop_equity(result, node, player, cfreach);
+                }
+            }
+            #[cfg(not(feature = "bincode"))]
+            {
+                self.evaluate_flop_equity(result, node, player, cfreach);
             }
         }
         // showdown (optimized for no rake; 2-pass)
@@ -321,5 +340,406 @@ impl PostFlopGame {
                     }
                 });
         }
+    }
+
+    /// Evaluates equity at flop by averaging showdown results over all turn/river runouts.
+    /// This is used for flop-only solving mode.
+    fn evaluate_flop_equity(
+        &self,
+        result: &mut [f32],
+        node: &PostFlopNode,
+        player: usize,
+        cfreach: &[f32],
+    ) {
+        let pot = (self.tree_config.starting_pot + 2 * node.amount) as f64;
+        let half_pot = 0.5 * pot;
+        let rake = min(pot * self.tree_config.rake_rate, self.tree_config.rake_cap);
+        let amount_win = (half_pot - rake) / self.num_combinations;
+        let amount_lose = -half_pot / self.num_combinations;
+
+        let flop = self.card_config.flop;
+        let flop_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
+
+        let player_cards = &self.private_cards[player];
+        let opponent_cards = &self.private_cards[player ^ 1];
+
+        // Initialize result to zero
+        result.iter_mut().for_each(|v| {
+            *v = 0.0;
+        });
+
+        // Count total runouts for normalization
+        let mut total_runouts = 0u32;
+
+        // Iterate over all possible turn cards
+        for turn in 0u8..52 {
+            let turn_mask = 1u64 << turn;
+            if turn_mask & flop_mask != 0 {
+                continue;
+            }
+
+            // Iterate over all possible river cards
+            for river in 0u8..52 {
+                let river_mask = 1u64 << river;
+                if river_mask & (flop_mask | turn_mask) != 0 {
+                    continue;
+                }
+
+                total_runouts += 1;
+                let pair_index = card_pair_to_index(turn, river);
+                let board_mask = flop_mask | turn_mask | river_mask;
+
+                // Get hand strength for this runout
+                let hand_strength = &self.hand_strength[pair_index];
+                let player_strength = &hand_strength[player];
+                let opponent_strength = &hand_strength[player ^ 1];
+
+                // Skip if no valid hands for this runout
+                if player_strength.is_empty() || opponent_strength.is_empty() {
+                    continue;
+                }
+
+                let valid_player_strength = &player_strength[1..player_strength.len() - 1];
+                let valid_opponent_strength = &opponent_strength[1..opponent_strength.len() - 1];
+
+                // Build opponent reach sums for this runout
+                let mut cfreach_sum_runout = 0.0f64;
+                let mut cfreach_minus_runout = [0.0f64; 52];
+
+                for &StrengthItem { index, .. } in valid_opponent_strength {
+                    let (c1, c2) = opponent_cards[index as usize];
+                    let hand_mask = (1u64 << c1) | (1u64 << c2);
+                    if hand_mask & board_mask != 0 {
+                        continue;
+                    }
+                    let cfreach_i = cfreach[index as usize] as f64;
+                    if cfreach_i != 0.0 {
+                        cfreach_sum_runout += cfreach_i;
+                        cfreach_minus_runout[c1 as usize] += cfreach_i;
+                        cfreach_minus_runout[c2 as usize] += cfreach_i;
+                    }
+                }
+
+                if cfreach_sum_runout == 0.0 {
+                    continue;
+                }
+
+                // First pass: count wins (opponents with lower strength)
+                let mut cfreach_sum_win = 0.0f64;
+                let mut cfreach_minus_win = [0.0f64; 52];
+                let mut opp_idx = 1usize;
+
+                for &StrengthItem { strength, index } in valid_player_strength {
+                    let (c1, c2) = player_cards[index as usize];
+                    let hand_mask = (1u64 << c1) | (1u64 << c2);
+                    if hand_mask & board_mask != 0 {
+                        continue;
+                    }
+
+                    while opp_idx < opponent_strength.len() - 1
+                        && opponent_strength[opp_idx].strength < strength
+                    {
+                        let opp_item = &opponent_strength[opp_idx];
+                        let (oc1, oc2) = opponent_cards[opp_item.index as usize];
+                        let opp_mask = (1u64 << oc1) | (1u64 << oc2);
+                        if opp_mask & board_mask == 0 {
+                            let cf = cfreach[opp_item.index as usize] as f64;
+                            if cf != 0.0 {
+                                cfreach_sum_win += cf;
+                                cfreach_minus_win[oc1 as usize] += cf;
+                                cfreach_minus_win[oc2 as usize] += cf;
+                            }
+                        }
+                        opp_idx += 1;
+                    }
+
+                    let cfreach_win = cfreach_sum_win
+                        - cfreach_minus_win[c1 as usize]
+                        - cfreach_minus_win[c2 as usize];
+
+                    result[index as usize] += (amount_win * cfreach_win) as f32;
+                }
+
+                // Second pass: count losses (opponents with higher strength)
+                let mut cfreach_sum_lose = 0.0f64;
+                let mut cfreach_minus_lose = [0.0f64; 52];
+                opp_idx = opponent_strength.len() - 2;
+
+                for &StrengthItem { strength, index } in valid_player_strength.iter().rev() {
+                    let (c1, c2) = player_cards[index as usize];
+                    let hand_mask = (1u64 << c1) | (1u64 << c2);
+                    if hand_mask & board_mask != 0 {
+                        continue;
+                    }
+
+                    while opp_idx > 0 && opponent_strength[opp_idx].strength > strength {
+                        let opp_item = &opponent_strength[opp_idx];
+                        let (oc1, oc2) = opponent_cards[opp_item.index as usize];
+                        let opp_mask = (1u64 << oc1) | (1u64 << oc2);
+                        if opp_mask & board_mask == 0 {
+                            let cf = cfreach[opp_item.index as usize] as f64;
+                            if cf != 0.0 {
+                                cfreach_sum_lose += cf;
+                                cfreach_minus_lose[oc1 as usize] += cf;
+                                cfreach_minus_lose[oc2 as usize] += cf;
+                            }
+                        }
+                        opp_idx -= 1;
+                    }
+
+                    let cfreach_lose = cfreach_sum_lose
+                        - cfreach_minus_lose[c1 as usize]
+                        - cfreach_minus_lose[c2 as usize];
+
+                    result[index as usize] += (amount_lose * cfreach_lose) as f32;
+                }
+            }
+        }
+
+        // Normalize by number of runouts
+        if total_runouts > 0 {
+            let scale = 1.0 / total_runouts as f32;
+            for r in result.iter_mut() {
+                *r *= scale;
+            }
+        }
+    }
+
+    /// Evaluates flop terminal using precomputed EVs from the EV map.
+    /// This is the "Perfect Leaf Evaluator" for flop-only solving.
+    ///
+    /// Uses Range-Agnostic transfer via Equity-Ratio Scaling:
+    ///   EV_final = Precomputed_EV × (Current_Equity / Precomputed_Equity)
+    #[cfg(feature = "bincode")]
+    fn evaluate_with_ev_map(
+        &self,
+        result: &mut [f32],
+        node: &PostFlopNode,
+        player: usize,
+        cfreach: &[f32],
+    ) {
+        let ev_map = match &self.ev_map {
+            Some(map) => map,
+            None => {
+                // Fallback to equity-based evaluation
+                self.evaluate_flop_equity(result, node, player, cfreach);
+                return;
+            }
+        };
+
+        let pot = (self.tree_config.starting_pot + 2 * node.amount) as f64;
+        let half_pot = 0.5 * pot;
+
+        let player_cards = &self.private_cards[player];
+        let opponent_cards = &self.private_cards[player ^ 1];
+
+        let flop = self.card_config.flop;
+        let flop_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
+
+        // Compute current equity for each hand against opponent's reach-weighted range
+        let current_equities = self.compute_current_equities(player, cfreach);
+
+        // Compute path hash for this terminal
+        // For POC, use a simple hash based on pot size (different bet sizes = different paths)
+        let path_hash = self.compute_path_hash_simple(node);
+
+        // Initialize result to zero
+        result.iter_mut().for_each(|v| *v = 0.0);
+
+        // Valid opponent indices for card blocking
+        let valid_indices = &self.valid_indices_flop[player ^ 1];
+
+        // Compute opponent reach sum and per-card reach for blocking
+        let mut cfreach_sum = 0.0f64;
+        let mut cfreach_minus = [0.0f64; 52];
+
+        for &i in valid_indices {
+            let cfreach_i = cfreach[i as usize] as f64;
+            if cfreach_i != 0.0 {
+                let (c1, c2) = opponent_cards[i as usize];
+                cfreach_sum += cfreach_i;
+                cfreach_minus[c1 as usize] += cfreach_i;
+                cfreach_minus[c2 as usize] += cfreach_i;
+            }
+        }
+
+        if cfreach_sum == 0.0 {
+            return;
+        }
+
+        let player_indices = &self.valid_indices_flop[player];
+
+        for &i in player_indices {
+            let (c1, c2) = player_cards[i as usize];
+            let hand_mask = (1u64 << c1) | (1u64 << c2);
+
+            // Skip if hand conflicts with board
+            if hand_mask & flop_mask != 0 {
+                continue;
+            }
+
+            let hand = if c1 < c2 { (c1, c2) } else { (c2, c1) };
+            let current_equity = current_equities[i as usize];
+
+            // Look up EV from the map with equity-ratio scaling
+            if let Some(ev) = ev_map.get_ev_with_transfer(path_hash, player, hand, current_equity) {
+                // Apply card removal / blocking adjustment
+                // Compute the opponent weight after removing our cards
+                let opponent_weight = cfreach_sum
+                    - cfreach_minus[c1 as usize]
+                    - cfreach_minus[c2 as usize];
+
+                // Scale EV by opponent reach (for CFR weighting)
+                result[i as usize] = (ev as f64 * opponent_weight / self.num_combinations) as f32;
+            } else {
+                // Fallback: use simple equity-based value
+                let opponent_weight = cfreach_sum
+                    - cfreach_minus[c1 as usize]
+                    - cfreach_minus[c2 as usize];
+
+                let amount_win = (half_pot) / self.num_combinations;
+                let amount_lose = -half_pot / self.num_combinations;
+
+                // Simple equity-based fallback
+                let ev = current_equity as f64 * amount_win
+                    + (1.0 - current_equity as f64) * amount_lose;
+                result[i as usize] = (ev * opponent_weight) as f32;
+            }
+        }
+    }
+
+    /// Compute current equity for each hand against opponent's reach-weighted range.
+    #[cfg(feature = "bincode")]
+    fn compute_current_equities(&self, player: usize, cfreach: &[f32]) -> Vec<f32> {
+        let player_cards = &self.private_cards[player];
+        let opponent_cards = &self.private_cards[player ^ 1];
+
+        let flop = self.card_config.flop;
+        let flop_mask: u64 = (1 << flop[0]) | (1 << flop[1]) | (1 << flop[2]);
+
+        let mut equities = vec![0.0f32; player_cards.len()];
+
+        // For each player hand, compute equity against opponent's reach-weighted range
+        for (hand_idx, &(c1, c2)) in player_cards.iter().enumerate() {
+            let hand_mask = (1u64 << c1) | (1u64 << c2);
+
+            // Skip if hand conflicts with board
+            if hand_mask & flop_mask != 0 {
+                continue;
+            }
+
+            let mut total_weight = 0.0f64;
+            let mut win_weight = 0.0f64;
+
+            // Compare against each opponent hand
+            for (opp_idx, &(oc1, oc2)) in opponent_cards.iter().enumerate() {
+                let opp_mask = (1u64 << oc1) | (1u64 << oc2);
+
+                // Skip if opponent hand conflicts with our hand or board
+                if opp_mask & (hand_mask | flop_mask) != 0 {
+                    continue;
+                }
+
+                let weight = cfreach[opp_idx] as f64;
+                if weight <= 0.0 {
+                    continue;
+                }
+
+                total_weight += weight;
+
+                // Simple hand strength comparison on flop
+                let our_strength = self.simple_hand_strength_flop(c1, c2);
+                let opp_strength = self.simple_hand_strength_flop(oc1, oc2);
+
+                if our_strength > opp_strength {
+                    win_weight += weight;
+                } else if our_strength == opp_strength {
+                    win_weight += weight * 0.5;
+                }
+            }
+
+            equities[hand_idx] = if total_weight > 0.0 {
+                (win_weight / total_weight) as f32
+            } else {
+                0.5
+            };
+        }
+
+        equities
+    }
+
+    /// Simple hand strength on flop (approximation for equity calculation).
+    #[cfg(feature = "bincode")]
+    fn simple_hand_strength_flop(&self, c1: Card, c2: Card) -> u32 {
+        let flop = &self.card_config.flop;
+        let flop_ranks: [u8; 3] = [flop[0] >> 2, flop[1] >> 2, flop[2] >> 2];
+        let flop_suits: [u8; 3] = [flop[0] & 3, flop[1] & 3, flop[2] & 3];
+
+        let rank1 = c1 >> 2;
+        let rank2 = c2 >> 2;
+        let suit1 = c1 & 3;
+        let suit2 = c2 & 3;
+
+        let high = rank1.max(rank2);
+        let low = rank1.min(rank2);
+        let paired = rank1 == rank2;
+
+        // Check for trips
+        let matching_flop = flop_ranks.iter().filter(|&&r| r == rank1 || r == rank2).count();
+        if matching_flop >= 2 && paired {
+            return 7000 + high as u32; // Full house potential
+        }
+        if matching_flop >= 2 {
+            return 6000 + high as u32; // Trips
+        }
+
+        // Check for two pair
+        let board_pairs: Vec<u8> = flop_ranks.iter()
+            .filter(|&&r| r == rank1 || r == rank2)
+            .cloned()
+            .collect();
+        if board_pairs.len() == 2 && !paired {
+            return 5000 + high as u32 * 15 + low as u32; // Two pair
+        }
+
+        // Check for pair
+        if paired {
+            let overpair = flop_ranks.iter().all(|&r| rank1 > r);
+            if overpair {
+                return 4500 + high as u32 * 15; // Overpair
+            }
+            return 4000 + high as u32 * 15; // Pocket pair
+        }
+
+        if board_pairs.len() == 1 {
+            // One pair with board
+            let pair_rank = board_pairs[0];
+            let kicker = if pair_rank == rank1 { rank2 } else { rank1 };
+            return 3000 + pair_rank as u32 * 15 + kicker as u32; // Top/middle/bottom pair
+        }
+
+        // Flush draw
+        let flush_suit = if suit1 == suit2 { Some(suit1) } else { None };
+        let flush_draw = flush_suit.map_or(false, |s| {
+            flop_suits.iter().filter(|&&fs| fs == s).count() >= 2
+        });
+
+        // High card with draws
+        let base = high as u32 * 15 + low as u32;
+        if flush_draw {
+            return 2000 + base; // Flush draw
+        }
+
+        // Pure high card
+        base
+    }
+
+    /// Compute a simple path hash for the current terminal.
+    /// For POC, we use the pot size as a proxy for different bet paths.
+    #[cfg(feature = "bincode")]
+    fn compute_path_hash_simple(&self, node: &PostFlopNode) -> u64 {
+        // Use pot size as a simple hash - different bet sizes lead to different pot sizes
+        let pot = self.tree_config.starting_pot + 2 * node.amount;
+        pot as u64
     }
 }

@@ -240,4 +240,28 @@ impl PostFlopNode {
             )
         }
     }
+
+    /// Returns the turn card for this node.
+    #[inline]
+    pub fn turn(&self) -> crate::card::Card {
+        self.turn
+    }
+
+    /// Returns the river card for this node.
+    #[inline]
+    pub fn river(&self) -> crate::card::Card {
+        self.river
+    }
+
+    /// Returns the children offset for this node.
+    #[inline]
+    pub fn children_offset(&self) -> u32 {
+        self.children_offset
+    }
+
+    /// Returns the amount (cumulative bet) at this node.
+    #[inline]
+    pub fn amount(&self) -> i32 {
+        self.amount
+    }
 }
