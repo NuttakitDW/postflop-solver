@@ -1,10 +1,13 @@
 use super::*;
 
+#[cfg(feature = "bincode")]
+use crate::file::{DECODE_OUTPUT_MODE, ENCODE_OUTPUT_MODE};
 use crate::interface::*;
 use crate::utility::*;
 use std::cell::Cell;
 use std::ptr;
 
+#[cfg(feature = "bincode")]
 use bincode::{
     de::Decoder,
     enc::Encoder,
@@ -113,8 +116,10 @@ impl PostFlopGame {
     }
 }
 
+#[cfg(feature = "bincode")]
 static VERSION_STR: &str = "2026-01-28";
 
+#[cfg(feature = "bincode")]
 thread_local! {
     static PTR_BASE: Cell<[*const u8; 2]> = Cell::new([ptr::null(); 2]);
     static CHANCE_BASE: Cell<*const u8> = Cell::new(ptr::null());
@@ -122,6 +127,7 @@ thread_local! {
     static CHANCE_BASE_MUT: Cell<*mut u8> = Cell::new(ptr::null_mut());
 }
 
+#[cfg(feature = "bincode")]
 impl Encode for PostFlopGame {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         if self.state <= State::Uninitialized {
@@ -129,6 +135,10 @@ impl Encode for PostFlopGame {
         }
 
         let num_storage = self.num_target_storage();
+
+        // Get the output mode from thread-local storage
+        let output_mode = ENCODE_OUTPUT_MODE.with(|c| c.get());
+        let is_display_mode = output_mode.is_display();
 
         // version
         VERSION_STR.to_string().encode(encoder)?;
@@ -148,7 +158,14 @@ impl Encode for PostFlopGame {
         self.num_storage_chance.encode(encoder)?;
         self.misc_memory_usage.encode(encoder)?;
         self.storage1[0..num_storage[0]].encode(encoder)?;
-        self.storage2[0..num_storage[1]].encode(encoder)?;
+
+        // In display mode, write empty vec for storage2 (regrets) to save space
+        if is_display_mode {
+            Vec::<u8>::new().encode(encoder)?;
+        } else {
+            self.storage2[0..num_storage[1]].encode(encoder)?;
+        }
+
         self.storage_ip[0..num_storage[2]].encode(encoder)?;
         self.storage_chance[0..num_storage[3]].encode(encoder)?;
 
@@ -187,9 +204,15 @@ impl Encode for PostFlopGame {
     }
 }
 
+#[cfg(feature = "bincode")]
 impl<Context> Decode<Context> for PostFlopGame {
     fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
         log_info!("[DECODE] Starting PostFlopGame decode...");
+
+        // Get the output mode from thread-local storage (set by load_data_from_std_read)
+        let output_mode = DECODE_OUTPUT_MODE.with(|c| c.get());
+        let is_display_mode = output_mode.is_display();
+        log_info!("[DECODE] Output mode: {:?}", output_mode);
 
         // version check
         let version = String::decode(decoder)?;
@@ -237,17 +260,36 @@ impl<Context> Decode<Context> for PostFlopGame {
         );
 
         game.target_storage_mode = game.storage_mode;
-        if game.storage_mode == BoardState::River && game.state >= State::MemoryAllocated {
+
+        // Handle storage allocation
+        if game.state >= State::MemoryAllocated {
             let num_bytes = if game.is_compression_enabled { 2 } else { 4 };
-            game.storage2 = vec![0; (num_bytes * game.num_storage) as usize];
-            game.storage_ip = vec![0; (num_bytes * game.num_storage_ip) as usize];
-            game.storage_chance = vec![0; (num_bytes * game.num_storage_chance) as usize];
-            log_info!(
-                "[DECODE] River storage allocated: {}MB + {}MB + {}MB",
-                game.storage2.len() / 1_048_576,
-                game.storage_ip.len() / 1_048_576,
-                game.storage_chance.len() / 1_048_576
-            );
+
+            // In display mode, storage2 is empty in the file, so we need to allocate it
+            if is_display_mode && game.storage2.is_empty() {
+                game.storage2 = vec![0; (num_bytes * game.num_storage) as usize];
+                log_info!(
+                    "[DECODE] Display mode: allocated storage2: {}MB",
+                    game.storage2.len() / 1_048_576
+                );
+            }
+
+            // For river mode, reallocate storage_ip and storage_chance
+            // (original behavior: these are not stored for river mode to save space)
+            if game.storage_mode == BoardState::River {
+                // Ensure storage2 is allocated (for display mode or any other case)
+                if game.storage2.len() < (num_bytes * game.num_storage) as usize {
+                    game.storage2 = vec![0; (num_bytes * game.num_storage) as usize];
+                }
+                game.storage_ip = vec![0; (num_bytes * game.num_storage_ip) as usize];
+                game.storage_chance = vec![0; (num_bytes * game.num_storage_chance) as usize];
+                log_info!(
+                    "[DECODE] River storage allocated: {}MB + {}MB + {}MB",
+                    game.storage2.len() / 1_048_576,
+                    game.storage_ip.len() / 1_048_576,
+                    game.storage_chance.len() / 1_048_576
+                );
+            }
         }
 
         // store base pointers
@@ -288,8 +330,8 @@ impl<Context> Decode<Context> for PostFlopGame {
         game.init_interpreter();
         game.back_to_root();
 
-        // restore the counterfactual values
-        if game.storage_mode == BoardState::River && game.state == State::Solved {
+        // restore the counterfactual values (only for full mode, not display mode)
+        if game.storage_mode == BoardState::River && game.state == State::Solved && !is_display_mode {
             log_info!("[DECODE] Finalizing (restoring counterfactual values)...");
             game.state = State::MemoryAllocated;
             finalize(&mut game);
@@ -300,6 +342,7 @@ impl<Context> Decode<Context> for PostFlopGame {
     }
 }
 
+#[cfg(feature = "bincode")]
 impl Encode for PostFlopNode {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         // contents
@@ -337,6 +380,7 @@ impl Encode for PostFlopNode {
     }
 }
 
+#[cfg(feature = "bincode")]
 impl<Context> Decode<Context> for PostFlopNode {
     fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
         // node instance

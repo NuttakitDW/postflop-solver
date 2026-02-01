@@ -13,6 +13,7 @@ use crate::bunching::*;
 use crate::game::*;
 use crate::interface::*;
 use bincode::{Decode, Encode};
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -21,7 +22,40 @@ use std::path::Path;
 use std::time::Instant;
 
 const MAGIC: u32 = 0x09f15790;
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+
+/// Output mode for saving game data.
+///
+/// Controls what data is included when saving a game to file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputMode {
+    /// Full output with all data (strategies + regrets).
+    /// Required for resuming CFR iterations.
+    #[default]
+    Full = 0,
+    /// Display-only output (strategies only, no regrets).
+    /// Smaller file size (~50% reduction), suitable for UI display.
+    /// Cannot be used to resume CFR iterations.
+    Display = 1,
+}
+
+impl OutputMode {
+    /// Returns true if this is display mode (regrets are omitted).
+    #[inline]
+    pub fn is_display(&self) -> bool {
+        matches!(self, OutputMode::Display)
+    }
+}
+
+// Thread-local storage for output mode during encoding
+thread_local! {
+    pub(crate) static ENCODE_OUTPUT_MODE: Cell<OutputMode> = Cell::new(OutputMode::Full);
+}
+
+// Thread-local storage for output mode during decoding (set by load functions)
+thread_local! {
+    pub(crate) static DECODE_OUTPUT_MODE: Cell<OutputMode> = Cell::new(OutputMode::Full);
+}
 
 /// Macro for conditional logging
 #[cfg(feature = "logging")]
@@ -42,6 +76,7 @@ pub struct FileInfo {
     pub version: u8,
     pub compression_type: u8,
     pub data_type: u8,
+    pub output_mode: OutputMode,
     pub estimated_memory_usage: u64,
     pub memo: String,
     pub file_size: u64,
@@ -101,6 +136,31 @@ pub fn save_data_into_std_write<T: FileData, W: Write>(
     writer: &mut W,
     compression_level: Option<i32>,
 ) -> Result<(), String> {
+    save_data_into_std_write_with_mode(data, memo, writer, compression_level, OutputMode::Full)
+}
+
+/// Saves data into a standard writer with a specified output mode.
+///
+/// This function serializes the `data` into the `writer` using the specified output mode.
+/// This is useful if you want to save the data into a custom writer like `Vec<u8>`, but if you want
+/// to save the data into a file, use [`save_data_to_file_with_mode`] instead.
+///
+/// # Arguments
+///
+/// - `data`: The data to be saved, which is either a [`PostFlopGame`] or a [`BunchingData`].
+/// - `memo`: A memo string to be saved with the data.
+/// - `writer`: The writer to write the data into.
+/// - `compression_level`: The zstd compression level to use. If `None`, no compression is used.
+///   `Some(level)` can only be specified if the `zstd` feature is enabled.
+/// - `output_mode`: The output mode to use. `Full` includes all data (strategies + regrets),
+///   `Display` includes only strategies (smaller file, ~50% size reduction).
+pub fn save_data_into_std_write_with_mode<T: FileData, W: Write>(
+    data: &T,
+    memo: &str,
+    writer: &mut W,
+    compression_level: Option<i32>,
+    output_mode: OutputMode,
+) -> Result<(), String> {
     if !data.is_ready_to_save() {
         return Err("Data is not ready to save".to_string());
     }
@@ -110,6 +170,9 @@ pub fn save_data_into_std_write<T: FileData, W: Write>(
         return Err("Compression is not supported".to_string());
     }
 
+    // Set the output mode for encoding
+    ENCODE_OUTPUT_MODE.with(|c| c.set(output_mode));
+
     encode_into_std_write(MAGIC, writer, "Failed to write magic number")?;
     encode_into_std_write(VERSION, writer, "Failed to write version number")?;
 
@@ -117,6 +180,7 @@ pub fn save_data_into_std_write<T: FileData, W: Write>(
     encode_into_std_write(compression_type, writer, "Failed to write compression type")?;
 
     encode_into_std_write(T::data_type() as u8, writer, "Failed to write data type")?;
+    encode_into_std_write(output_mode as u8, writer, "Failed to write output mode")?;
     encode_into_std_write(
         data.estimated_memory_usage(),
         writer,
@@ -171,9 +235,33 @@ pub fn save_data_to_file<T: FileData, P: AsRef<Path>>(
     path: P,
     compression_level: Option<i32>,
 ) -> Result<(), String> {
+    save_data_to_file_with_mode(data, memo, path, compression_level, OutputMode::Full)
+}
+
+/// Saves data into a file with a specified output mode.
+///
+/// This function serializes the `data` into a file specified by `path` using the specified output mode.
+/// If the file already exists, it will be overwritten.
+///
+/// # Arguments
+///
+/// - `data`: The data to be saved, which is either a [`PostFlopGame`] or a [`BunchingData`].
+/// - `memo`: A memo string to be saved with the data.
+/// - `path`: The path to the file to save.
+/// - `compression_level`: The zstd compression level to use. If `None`, no compression is used.
+///   `Some(level)` can only be specified if the `zstd` feature is enabled.
+/// - `output_mode`: The output mode to use. `Full` includes all data (strategies + regrets),
+///   `Display` includes only strategies (smaller file, ~50% size reduction).
+pub fn save_data_to_file_with_mode<T: FileData, P: AsRef<Path>>(
+    data: &T,
+    memo: &str,
+    path: P,
+    compression_level: Option<i32>,
+    output_mode: OutputMode,
+) -> Result<(), String> {
     let file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
     let mut writer = BufWriter::new(file);
-    save_data_into_std_write(data, memo, &mut writer, compression_level)
+    save_data_into_std_write_with_mode(data, memo, &mut writer, compression_level, output_mode)
 }
 
 fn decode_from_std_read<D: Decode<()>, R: Read>(reader: &mut R, err_msg: &str) -> Result<D, String> {
@@ -211,8 +299,9 @@ pub fn load_data_from_std_read<T: FileData, R: Read>(
     log_info!("[LOAD] Magic number validated");
 
     let version: u8 = decode_from_std_read(reader, "Failed to read version number")?;
-    if version != VERSION {
-        return Err("Version number is invalid".to_string());
+    // Support both version 1 (legacy) and version 2 (with output mode)
+    if version != 1 && version != VERSION {
+        return Err(format!("Version number {} is not supported (expected 1 or {})", version, VERSION));
     }
     log_info!("[LOAD] Version: {}", version);
 
@@ -232,6 +321,22 @@ pub fn load_data_from_std_read<T: FileData, R: Read>(
         return Err("Data type is invalid".to_string());
     }
     log_info!("[LOAD] Data type: {}", data_type);
+
+    // Read output mode (version 2+) or default to Full (version 1)
+    let output_mode = if version >= 2 {
+        let mode_byte: u8 = decode_from_std_read(reader, "Failed to read output mode")?;
+        match mode_byte {
+            0 => OutputMode::Full,
+            1 => OutputMode::Display,
+            _ => return Err(format!("Invalid output mode: {}", mode_byte)),
+        }
+    } else {
+        OutputMode::Full
+    };
+    log_info!("[LOAD] Output mode: {:?}", output_mode);
+
+    // Set the output mode for decoding
+    DECODE_OUTPUT_MODE.with(|c| c.set(output_mode));
 
     let estimated_memory_usage: u64 = decode_from_std_read(reader, "Failed to read memory usage")?;
     log_info!("[LOAD] Estimated memory: {} MB", estimated_memory_usage / 1_048_576);
@@ -297,8 +402,9 @@ pub fn read_file_info<P: AsRef<Path>>(path: P) -> Result<FileInfo, String> {
     }
 
     let version: u8 = decode_from_std_read(&mut reader, "Failed to read version number")?;
-    if version != VERSION {
-        return Err("Version number is invalid".to_string());
+    // Support both version 1 (legacy) and version 2 (with output mode)
+    if version != 1 && version != VERSION {
+        return Err(format!("Version number {} is not supported (expected 1 or {})", version, VERSION));
     }
 
     let compression_type: u8 = decode_from_std_read(&mut reader, "Failed to read compression type")?;
@@ -308,6 +414,18 @@ pub fn read_file_info<P: AsRef<Path>>(path: P) -> Result<FileInfo, String> {
 
     let data_type: u8 = decode_from_std_read(&mut reader, "Failed to read data type")?;
 
+    // Read output mode (version 2+) or default to Full (version 1)
+    let output_mode = if version >= 2 {
+        let mode_byte: u8 = decode_from_std_read(&mut reader, "Failed to read output mode")?;
+        match mode_byte {
+            0 => OutputMode::Full,
+            1 => OutputMode::Display,
+            _ => return Err(format!("Invalid output mode: {}", mode_byte)),
+        }
+    } else {
+        OutputMode::Full
+    };
+
     let estimated_memory_usage: u64 = decode_from_std_read(&mut reader, "Failed to read memory usage")?;
 
     let memo: String = decode_from_std_read(&mut reader, "Failed to read memo")?;
@@ -316,6 +434,7 @@ pub fn read_file_info<P: AsRef<Path>>(path: P) -> Result<FileInfo, String> {
         version,
         compression_type,
         data_type,
+        output_mode,
         estimated_memory_usage,
         memo,
         file_size,
@@ -379,6 +498,7 @@ mod tests {
     use crate::action_tree::*;
     use crate::card::*;
     use crate::range::*;
+    use crate::utility::*;
 
     #[test]
     #[cfg(feature = "zstd")]
@@ -424,6 +544,61 @@ mod tests {
         assert!((root_equity_ip - 0.5).abs() < 1e-5);
         assert!((root_ev_oop - 45.0).abs() < 1e-4);
         assert!((root_ev_ip - 15.0).abs() < 1e-4);
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn save_and_load_display_mode() {
+        let card_config = CardConfig {
+            range: [Range::ones(); 2],
+            flop: flop_from_str("Td9d6h").unwrap(),
+            ..Default::default()
+        };
+
+        let tree_config = TreeConfig {
+            starting_pot: 60,
+            effective_stack: 970,
+            flop_bet_sizes: [("50%", "").try_into().unwrap(), Default::default()],
+            turn_bet_sizes: [("50%", "").try_into().unwrap(), Default::default()],
+            ..Default::default()
+        };
+
+        let action_tree = ActionTree::new(tree_config).unwrap();
+        let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
+
+        game.allocate_memory(false);
+        finalize(&mut game);
+
+        // Set target storage mode to Flop so that storage2 is actually written in Full mode
+        // (River mode already omits storage2 to save space)
+        game.set_target_storage_mode(BoardState::Flop).unwrap();
+
+        // save in full mode
+        save_data_to_file_with_mode(&game, "", "tmpfile-full.flop", Some(3), OutputMode::Full).unwrap();
+        let full_size = std::fs::metadata("tmpfile-full.flop").unwrap().len();
+
+        // save in display mode
+        save_data_to_file_with_mode(&game, "", "tmpfile-display.flop", Some(3), OutputMode::Display).unwrap();
+        let display_size = std::fs::metadata("tmpfile-display.flop").unwrap().len();
+
+        // display mode should be smaller (no storage2/regrets)
+        assert!(display_size < full_size, "display_size={} should be < full_size={}", display_size, full_size);
+
+        // load display mode file and verify it's usable for display
+        let file_info = read_file_info("tmpfile-display.flop").unwrap();
+        assert_eq!(file_info.output_mode, OutputMode::Display);
+
+        let mut game_display: PostFlopGame = load_data_from_file("tmpfile-display.flop", None).unwrap().0;
+        game_display.cache_normalized_weights();
+
+        // equities should still be correct
+        let weights_oop = game_display.normalized_weights(0);
+        let root_equity_oop = compute_average(&game_display.equity(0), weights_oop);
+        assert!((root_equity_oop - 0.5).abs() < 1e-5);
+
+        // cleanup
+        std::fs::remove_file("tmpfile-full.flop").unwrap();
+        std::fs::remove_file("tmpfile-display.flop").unwrap();
     }
 
 }

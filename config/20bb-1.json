@@ -42,6 +42,7 @@
   },
   "output": {
     "filename": "20bb.flop",
+    "outputMode": "display",
     "compressionLevel": 10,
     "memo": "Td9d6h flop, pot=55, stack=180"
   }
