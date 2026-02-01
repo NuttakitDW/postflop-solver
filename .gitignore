@@ -3,5 +3,8 @@ Cargo.lock
 
 # Output files (large solver output)
 *.flop
+*.bin
+*.pfs
+out/
 
 # Keep config/*.json tracked
