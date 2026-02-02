@@ -59,6 +59,9 @@ mod alloc;
 #[cfg(feature = "bincode")]
 mod file;
 
+#[cfg(feature = "deep")]
+pub mod deep;
+
 mod action_tree;
 mod atomic_float;
 mod bet_size;

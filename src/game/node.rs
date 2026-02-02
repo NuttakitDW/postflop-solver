@@ -240,4 +240,28 @@ impl PostFlopNode {
             )
         }
     }
+
+    /// Returns the turn card at this node (or NOT_DEALT if not yet dealt).
+    #[inline]
+    pub fn turn_card(&self) -> Card {
+        self.turn
+    }
+
+    /// Returns the river card at this node (or NOT_DEALT if not yet dealt).
+    #[inline]
+    pub fn river_card(&self) -> Card {
+        self.river
+    }
+
+    /// Returns the current bet amount at this node.
+    #[inline]
+    pub fn bet_amount(&self) -> i32 {
+        self.amount
+    }
+
+    /// Returns the previous action that led to this node.
+    #[inline]
+    pub fn previous_action(&self) -> Action {
+        self.prev_action
+    }
 }
