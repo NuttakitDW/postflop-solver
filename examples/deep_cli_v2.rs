@@ -5,8 +5,10 @@
 //! Examples:
 //!   ./target/release/examples/deep_cli_v2 --range --position oop
 //!   ./target/release/examples/deep_cli_v2 --range --position ip
+//!   ./target/release/examples/deep_cli_v2 --range --position oop --hands "QQ+,AKs"
+//!   ./target/release/examples/deep_cli_v2 --range --position ip --hands "22+,A2s+,KQs"
 
-use std::io::{self, Write};
+use postflop_solver::Range;
 
 #[cfg(feature = "deep")]
 use candle_core::{DType, Device, Tensor};
@@ -94,8 +96,27 @@ fn card_to_string(card: u8) -> String {
     format!("{}{}", r, s)
 }
 
+/// Get hands from a Range, filtered by flop blockers
 #[cfg(feature = "deep")]
-fn show_range(net: &StrategyNet, device: &Device, flop: [u8; 3], position: &str) {
+fn range_to_hands(range: &Range, flop: &[u8; 3]) -> Vec<(u8, u8)> {
+    let mut hands = Vec::new();
+
+    for c1 in 0..52u8 {
+        for c2 in (c1 + 1)..52u8 {
+            if flop.contains(&c1) || flop.contains(&c2) { continue; }
+
+            let weight = range.get_weight_by_cards(c1, c2);
+            if weight > 0.0 {
+                hands.push((c1, c2));
+            }
+        }
+    }
+
+    hands
+}
+
+#[cfg(feature = "deep")]
+fn show_range(net: &StrategyNet, device: &Device, flop: [u8; 3], position: &str, hands_filter: Option<&str>) {
     let player = if position == "oop" { 0 } else { 1 };
 
     let action_names: &[&str] = if position == "oop" {
@@ -104,15 +125,30 @@ fn show_range(net: &StrategyNet, device: &Device, flop: [u8; 3], position: &str)
         &["Check", "Bet 15", "Bet 34", "Bet 52", "Bet 76"]
     };
 
-    // Get all valid hands
-    let mut hands = Vec::new();
-    for c1 in 0..52u8 {
-        for c2 in (c1 + 1)..52u8 {
-            if !flop.contains(&c1) && !flop.contains(&c2) {
-                hands.push((c1, c2));
+    // Get hands based on filter
+    let hands: Vec<(u8, u8)> = if let Some(range_str) = hands_filter {
+        match range_str.parse::<Range>() {
+            Ok(range) => {
+                println!("Using range: {}", range_str);
+                range_to_hands(&range, &flop)
+            }
+            Err(e) => {
+                println!("Invalid range '{}': {}", range_str, e);
+                return;
             }
         }
-    }
+    } else {
+        // All valid hands
+        let mut h = Vec::new();
+        for c1 in 0..52u8 {
+            for c2 in (c1 + 1)..52u8 {
+                if !flop.contains(&c1) && !flop.contains(&c2) {
+                    h.push((c1, c2));
+                }
+            }
+        }
+        h
+    };
 
     println!("Analyzing {} {} hands on {} {} {}\n",
         hands.len(), position.to_uppercase(),
@@ -151,6 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut position = "oop".to_string();
     let mut show_range_flag = false;
+    let mut hands_filter: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -164,11 +201,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--range" => {
                 show_range_flag = true;
             }
+            "--hands" | "-h" => {
+                if i + 1 < args.len() {
+                    hands_filter = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
             "--help" => {
                 println!("Deep Strategy CLI v2\n");
                 println!("Usage:");
                 println!("  deep_cli_v2 --range --position oop");
                 println!("  deep_cli_v2 --range --position ip");
+                println!("  deep_cli_v2 --range --position oop --hands \"AA,KK,QQ+\"");
+                println!("  deep_cli_v2 --range --position ip --hands \"22+,AKs,AKo\"");
+                println!("\nRange syntax:");
+                println!("  AA      - pocket aces");
+                println!("  QQ+     - QQ, KK, AA");
+                println!("  AKs     - ace-king suited");
+                println!("  AKo     - ace-king offsuit");
+                println!("  ATs+    - ATs, AJs, AQs, AKs");
                 return Ok(());
             }
             _ => {}
@@ -195,7 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loaded! Board: Td 9d 6h\n");
 
     if show_range_flag {
-        show_range(&net, &device, flop, &position);
+        show_range(&net, &device, flop, &position, hands_filter.as_deref());
     } else {
         println!("Use --range --position oop/ip to see strategy");
     }
