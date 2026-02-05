@@ -231,6 +231,12 @@ impl PostFlopGame {
         &self.tree_config
     }
 
+    /// Obtains the number of nodes for each street [flop, turn, river].
+    #[inline]
+    pub fn num_nodes(&self) -> &[u64; 3] {
+        &self.num_nodes
+    }
+
     /// Obtains the added lines.
     #[inline]
     pub fn added_lines(&self) -> &[Vec<Action>] {

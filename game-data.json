@@ -1,0 +1,14 @@
+{
+  "memo": "",
+  "is_solved": true,
+  "storage_mode": "river",
+  "board": [
+    46,
+    42,
+    20
+  ],
+  "starting_pot": 60,
+  "effective_stack": 940,
+  "exported_at": "2026-02-04T17:09:07.693Z",
+  "note": "This is a JSON preview of the binary game file. It contains metadata only, not the full solver state."
+}

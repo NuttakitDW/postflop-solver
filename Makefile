@@ -1,6 +1,6 @@
 .PHONY: start start-debug build clean
 
-CONFIG ?= config/50bb.json
+CONFIG ?= config/template.json
 
 start:
 	cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc" -- $(CONFIG)

@@ -6,6 +6,9 @@ mod node;
 #[cfg(feature = "bincode")]
 mod serialization;
 
+#[cfg(feature = "json-export")]
+mod json_export;
+
 #[cfg(test)]
 mod tests;
 

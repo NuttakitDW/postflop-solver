@@ -5,3 +5,5 @@ Cargo.lock
 *.flop
 
 # Keep config/*.json tracked
+
+game-complete.json
