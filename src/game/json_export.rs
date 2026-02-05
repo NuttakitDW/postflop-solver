@@ -363,6 +363,40 @@ fn to_json_value_internal(game: &PostFlopGame) -> Result<Value, String> {
     let oop_initial_weights = game.initial_weights(0).to_vec();
     let ip_initial_weights = game.initial_weights(1).to_vec();
 
+    // Get equity and expected values if solved and normalized weights are cached
+    let (oop_equity, ip_equity, oop_ev, ip_ev, oop_eqr, ip_eqr) = if is_solved && game.is_normalized_weight_cached {
+        let oop_equity_vec = game.equity(0);
+        let ip_equity_vec = game.equity(1);
+        let oop_ev_vec = game.expected_values(0);
+        let ip_ev_vec = game.expected_values(1);
+
+        // Calculate EQR (Equity Realization) = EV / Equity
+        // Handle division by zero
+        #[cfg(feature = "rayon")]
+        let (oop_eqr_vec, ip_eqr_vec) = rayon::join(
+            || oop_ev_vec.par_iter().zip(oop_equity_vec.par_iter())
+                .map(|(&ev, &eq)| if eq > 0.01 { ev / eq } else { 0.0 })
+                .collect::<Vec<f32>>(),
+            || ip_ev_vec.par_iter().zip(ip_equity_vec.par_iter())
+                .map(|(&ev, &eq)| if eq > 0.01 { ev / eq } else { 0.0 })
+                .collect::<Vec<f32>>(),
+        );
+
+        #[cfg(not(feature = "rayon"))]
+        let (oop_eqr_vec, ip_eqr_vec) = (
+            oop_ev_vec.iter().zip(oop_equity_vec.iter())
+                .map(|(&ev, &eq)| if eq > 0.01 { ev / eq } else { 0.0 })
+                .collect::<Vec<f32>>(),
+            ip_ev_vec.iter().zip(ip_equity_vec.iter())
+                .map(|(&ev, &eq)| if eq > 0.01 { ev / eq } else { 0.0 })
+                .collect::<Vec<f32>>(),
+        );
+
+        (Some(oop_equity_vec), Some(ip_equity_vec), Some(oop_ev_vec), Some(ip_ev_vec), Some(oop_eqr_vec), Some(ip_eqr_vec))
+    } else {
+        (None, None, None, None, None, None)
+    };
+
     // Serialize added and removed lines (parallel processing)
     #[cfg(feature = "rayon")]
     let (added_lines, removed_lines) = rayon::join(
@@ -451,6 +485,12 @@ fn to_json_value_internal(game: &PostFlopGame) -> Result<Value, String> {
             "ip_private_cards": ip_private_cards,
             "oop_initial_weights": oop_initial_weights,
             "ip_initial_weights": ip_initial_weights,
+            "oop_equity": oop_equity,
+            "ip_equity": ip_equity,
+            "oop_ev": oop_ev,
+            "ip_ev": ip_ev,
+            "oop_eqr": oop_eqr,
+            "ip_eqr": ip_eqr,
         },
         "nodes": nodes,
     }))

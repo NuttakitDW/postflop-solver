@@ -6,4 +6,7 @@ Cargo.lock
 
 # Keep config/*.json tracked
 
-game-complete.json
+*-complete.json
+*-game-complete.json
+*-complete-test.json
+*.zip
