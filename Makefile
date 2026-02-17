@@ -1,12 +1,16 @@
-.PHONY: start start-debug build clean
+.PHONY: start start-debug start-deepstack build clean
 
-CONFIG ?= config/50bb.json
+CONFIG ?= config/template.json
+ORACLE ?= model_2.onnx
 
 start:
 	cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc" -- $(CONFIG)
 
 start-debug:
 	RUST_LOG=debug cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc logging" -- $(CONFIG)
+
+start-deepstack:
+	cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc onnx" -- $(CONFIG) --deepstack $(ORACLE)
 
 build:
 	cargo build --example backend_solver --release --features "bincode rayon zstd jemalloc"

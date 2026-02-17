@@ -240,4 +240,22 @@ impl PostFlopNode {
             )
         }
     }
+
+    /// Returns the turn card at this node, or `NOT_DEALT` if the turn hasn't been dealt yet.
+    #[inline]
+    pub fn turn(&self) -> Card {
+        self.turn
+    }
+
+    /// Returns the river card at this node, or `NOT_DEALT` if the river hasn't been dealt yet.
+    #[inline]
+    pub fn river(&self) -> Card {
+        self.river
+    }
+
+    /// Returns the action that led to this node (e.g., `Action::Chance(card)` for chance children).
+    #[inline]
+    pub fn prev_action(&self) -> Action {
+        self.prev_action
+    }
 }

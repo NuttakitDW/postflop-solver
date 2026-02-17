@@ -505,6 +505,257 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     }
 }
 
+#[cfg(feature = "onnx")]
+fn run_solver_deepstack(config: &SolverConfig, model_path: &str) -> SolverResult {
+    use postflop_solver::oracle::OnnxOracle;
+
+    let total_start = Instant::now();
+
+    // Load oracle with CoreML acceleration and session pool for parallel inference
+    println!("Loading ONNX oracle: {}", model_path);
+    let oracle = match OnnxOracle::new(model_path) {
+        Ok(o) => {
+            println!("Oracle loaded (CoreML + CPU, pool={})", o.pool_size());
+            o
+        }
+        Err(_) => match OnnxOracle::new_cpu(model_path) {
+            Ok(o) => {
+                println!("Oracle loaded (CPU only, pool={})", o.pool_size());
+                o
+            }
+            Err(e) => return create_error_result(format!("Failed to load oracle: {}", e)),
+        },
+    };
+
+    // Parse ranges
+    let oop: Range = match config.ranges.oop.parse() {
+        Ok(r) => r,
+        Err(e) => return create_error_result(format!("Failed to parse OOP range: {}", e)),
+    };
+
+    let ip: Range = match config.ranges.ip.parse() {
+        Ok(r) => r,
+        Err(e) => return create_error_result(format!("Failed to parse IP range: {}", e)),
+    };
+
+    // Parse flop
+    let flop = match flop_from_str(&config.board.flop) {
+        Ok(f) => f,
+        Err(e) => return create_error_result(format!("Failed to parse flop: {}", e)),
+    };
+
+    // Deepstack always starts from flop (turn/river handled by oracle)
+    let card_config = CardConfig {
+        range: [oop, ip],
+        flop,
+        turn: NOT_DEALT,
+        river: NOT_DEALT,
+    };
+
+    // Normalize bet sizes
+    let oop_flop_bet = normalize_bet_sizes(&config.bet_sizes.oop_flop_bet);
+    let oop_flop_raise = normalize_bet_sizes(&config.bet_sizes.oop_flop_raise);
+    let oop_turn_bet = normalize_bet_sizes(&config.bet_sizes.oop_turn_bet);
+    let oop_turn_raise = normalize_bet_sizes(&config.bet_sizes.oop_turn_raise);
+    let oop_river_bet = normalize_bet_sizes(&config.bet_sizes.oop_river_bet);
+    let oop_river_raise = normalize_bet_sizes(&config.bet_sizes.oop_river_raise);
+    let ip_flop_bet = normalize_bet_sizes(&config.bet_sizes.ip_flop_bet);
+    let ip_flop_raise = normalize_bet_sizes(&config.bet_sizes.ip_flop_raise);
+    let ip_turn_bet = normalize_bet_sizes(&config.bet_sizes.ip_turn_bet);
+    let ip_turn_raise = normalize_bet_sizes(&config.bet_sizes.ip_turn_raise);
+    let ip_river_bet = normalize_bet_sizes(&config.bet_sizes.ip_river_bet);
+    let ip_river_raise = normalize_bet_sizes(&config.bet_sizes.ip_river_raise);
+
+    // Parse bet sizes - OOP
+    let oop_flop_bet_sizes = match BetSizeOptions::try_from((
+        oop_flop_bet.as_str(),
+        oop_flop_raise.as_str(),
+    )) {
+        Ok(b) => b,
+        Err(e) => return create_error_result(format!("Failed to parse OOP flop bet sizes: {}", e)),
+    };
+
+    let oop_turn_bet_sizes = match BetSizeOptions::try_from((
+        oop_turn_bet.as_str(),
+        oop_turn_raise.as_str(),
+    )) {
+        Ok(b) => b,
+        Err(e) => return create_error_result(format!("Failed to parse OOP turn bet sizes: {}", e)),
+    };
+
+    let oop_river_bet_sizes = match BetSizeOptions::try_from((
+        oop_river_bet.as_str(),
+        oop_river_raise.as_str(),
+    )) {
+        Ok(b) => b,
+        Err(e) => return create_error_result(format!("Failed to parse OOP river bet sizes: {}", e)),
+    };
+
+    // Parse bet sizes - IP
+    let ip_flop_bet_sizes = match BetSizeOptions::try_from((
+        ip_flop_bet.as_str(),
+        ip_flop_raise.as_str(),
+    )) {
+        Ok(b) => b,
+        Err(e) => return create_error_result(format!("Failed to parse IP flop bet sizes: {}", e)),
+    };
+
+    let ip_turn_bet_sizes = match BetSizeOptions::try_from((
+        ip_turn_bet.as_str(),
+        ip_turn_raise.as_str(),
+    )) {
+        Ok(b) => b,
+        Err(e) => return create_error_result(format!("Failed to parse IP turn bet sizes: {}", e)),
+    };
+
+    let ip_river_bet_sizes = match BetSizeOptions::try_from((
+        ip_river_bet.as_str(),
+        ip_river_raise.as_str(),
+    )) {
+        Ok(b) => b,
+        Err(e) => return create_error_result(format!("Failed to parse IP river bet sizes: {}", e)),
+    };
+
+    // Parse donk sizes if enabled
+    let turn_donk_sizes = if config.tree.donk_option == 1 || config.tree.donk_option == 3 {
+        if !config.bet_sizes.oop_turn_donk.is_empty() {
+            let oop_turn_donk = normalize_bet_sizes(&config.bet_sizes.oop_turn_donk);
+            match DonkSizeOptions::try_from(oop_turn_donk.as_str()) {
+                Ok(d) => Some(d),
+                Err(e) => return create_error_result(format!("Failed to parse turn donk sizes: {}", e)),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let river_donk_sizes = if config.tree.donk_option == 2 || config.tree.donk_option == 3 {
+        if !config.bet_sizes.oop_river_donk.is_empty() {
+            let oop_river_donk = normalize_bet_sizes(&config.bet_sizes.oop_river_donk);
+            match DonkSizeOptions::try_from(oop_river_donk.as_str()) {
+                Ok(d) => Some(d),
+                Err(e) => return create_error_result(format!("Failed to parse river donk sizes: {}", e)),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let add_allin_threshold = config.tree.add_all_in_threshold / 100.0;
+    let force_allin_threshold = config.tree.force_all_in_threshold / 100.0;
+    let merging_threshold = config.tree.merging_threshold / 100.0;
+
+    let tree_config = TreeConfig {
+        initial_state: BoardState::Flop,
+        starting_pot: config.tree.starting_pot,
+        effective_stack: config.tree.effective_stack,
+        rake_rate: config.tree.rake_percent / 100.0,
+        rake_cap: config.tree.rake_cap,
+        flop_bet_sizes: [oop_flop_bet_sizes, ip_flop_bet_sizes],
+        turn_bet_sizes: [oop_turn_bet_sizes, ip_turn_bet_sizes],
+        river_bet_sizes: [oop_river_bet_sizes, ip_river_bet_sizes],
+        turn_donk_sizes,
+        river_donk_sizes,
+        add_allin_threshold,
+        force_allin_threshold,
+        merging_threshold,
+        max_raises_per_street: config.tree.max_raises_per_street,
+    };
+
+    // Build action tree
+    let action_tree = match ActionTree::new(tree_config) {
+        Ok(t) => t,
+        Err(e) => return create_error_result(format!("Failed to create action tree: {}", e)),
+    };
+
+    // Create game
+    let mut game = match PostFlopGame::with_config(card_config, action_tree) {
+        Ok(g) => g,
+        Err(e) => return create_error_result(format!("Failed to create game: {}", e)),
+    };
+
+    let oop_hands = game.private_cards(0).len();
+    let ip_hands = game.private_cards(1).len();
+
+    let (mem_uncompressed, _) = game.memory_usage();
+    let memory_mb = mem_uncompressed as f64 / 1024.0 / 1024.0;
+
+    println!("OOP hands: {}, IP hands: {}", oop_hands, ip_hands);
+    println!("Memory: {:.2} MB", memory_mb);
+    println!();
+
+    // Allocate memory
+    game.allocate_memory(config.solver.use_compression);
+
+    // Calculate target exploitability
+    let target_exploitability =
+        game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
+
+    // Solve with oracle
+    let solve_start = Instant::now();
+    let exploitability = solve_deepstack(
+        &mut game,
+        config.solver.max_iterations,
+        target_exploitability,
+        true,
+        &oracle,
+    );
+    let solve_time = solve_start.elapsed();
+
+    let exploitability_percent = exploitability / game.tree_config().starting_pot as f32 * 100.0;
+
+    // Generate memo
+    let memo = config.output.memo.clone().unwrap_or_else(|| {
+        format!(
+            "DEEPSTACK {} pot={}, stack={}, oracle={}",
+            config.board.flop,
+            config.tree.starting_pot,
+            config.tree.effective_stack,
+            model_path
+        )
+    });
+
+    // Save to file
+    if let Err(e) = save_data_to_file(&game, &memo, &config.output.filename, config.output.compression_level) {
+        return SolverResult {
+            success: false,
+            output_file: String::new(),
+            solve_time_seconds: solve_time.as_secs_f64(),
+            total_time_seconds: total_start.elapsed().as_secs_f64(),
+            final_exploitability: exploitability,
+            exploitability_percent,
+            memory_mb,
+            iterations_used: config.solver.max_iterations,
+            oop_hands,
+            ip_hands,
+            error: Some(format!("Failed to save file: {}", e)),
+        };
+    }
+
+    SolverResult {
+        success: true,
+        output_file: config.output.filename.clone(),
+        solve_time_seconds: solve_time.as_secs_f64(),
+        total_time_seconds: total_start.elapsed().as_secs_f64(),
+        final_exploitability: exploitability,
+        exploitability_percent,
+        memory_mb,
+        iterations_used: config.solver.max_iterations,
+        oop_hands,
+        ip_hands,
+        error: None,
+    }
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str) -> SolverResult {
+    create_error_result("Deepstack mode requires the 'onnx' feature. Rebuild with --features onnx".to_string())
+}
+
 fn main() {
     // Initialize logger for debug output
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
@@ -514,12 +765,13 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <config.json>", args[0]);
+        eprintln!("Usage: {} <config.json> [--deepstack <model.onnx>]", args[0]);
         eprintln!("       {} --generate-template", args[0]);
         eprintln!();
         eprintln!("Options:");
-        eprintln!("  <config.json>       Path to JSON configuration file");
-        eprintln!("  --generate-template Generate a template config file (config/template.json)");
+        eprintln!("  <config.json>                Path to JSON configuration file");
+        eprintln!("  --deepstack <model.onnx>     Use ONNX oracle for turn CFV prediction");
+        eprintln!("  --generate-template          Generate a template config file");
         std::process::exit(1);
     }
 
@@ -535,6 +787,21 @@ fn main() {
 
     let config_path = &args[1];
 
+    // Parse --deepstack flag
+    let deepstack_model = {
+        let mut model_path = None;
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "--deepstack" && i + 1 < args.len() {
+                model_path = Some(args[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        model_path
+    };
+
     if !Path::new(config_path).exists() {
         eprintln!("Error: Config file not found: {}", config_path);
         std::process::exit(1);
@@ -549,6 +816,11 @@ fn main() {
     println!("=== Backend Solver ===");
     println!("Config: {}", config_path);
     println!("Threads: {}", rayon::current_num_threads());
+    if let Some(ref model) = deepstack_model {
+        println!("Mode: DEEPSTACK (oracle: {})", model);
+    } else {
+        println!("Mode: Standard");
+    }
     println!();
     println!("Board: {} {} {}",
         config.board.flop,
@@ -562,7 +834,11 @@ fn main() {
     println!("Output: {}", config.output.filename);
     println!();
 
-    let result = run_solver(&config);
+    let result = if let Some(ref model_path) = deepstack_model {
+        run_solver_deepstack(&config, model_path)
+    } else {
+        run_solver(&config)
+    };
 
     // Output result as JSON for programmatic use
     let result_json = serde_json::to_string_pretty(&result).expect("Failed to serialize result");

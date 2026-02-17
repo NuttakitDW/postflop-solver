@@ -6,3 +6,4 @@ Cargo.lock
 
 # Keep config/*.json tracked
 preflop-ranges
+CLAUDE.md
