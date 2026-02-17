@@ -4,6 +4,7 @@ use crate::sliceop::*;
 use crate::utility::*;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
+#[cfg(any(feature = "onnx", feature = "logging"))]
 use std::time::Instant;
 
 #[cfg(feature = "onnx")]
@@ -92,6 +93,7 @@ pub fn solve<T: Game>(
     } else {
         0.0
     };
+    #[cfg(feature = "logging")]
     let solve_start = Instant::now();
     // Once exploitability drops below 1%, enter convergence mode
     // This applies higher floors to alpha_t and gamma_t to prevent oscillations
@@ -117,6 +119,7 @@ pub fn solve<T: Game>(
         // Recalculate exploitability before reset decision to avoid using stale values
         let is_power_of_4 = t > 0 && t == 1u32 << ((t.leading_zeros() ^ 31) & !1);
         if is_power_of_4 {
+            #[cfg(feature = "logging")]
             let old_exploitability = exploitability;
             exploitability = compute_exploitability(game);
             #[cfg(feature = "logging")]
@@ -222,6 +225,7 @@ pub fn solve<T: Game>(
         let check_exploitability = (t + 1) % 10 == 0 || t + 1 == max_num_iterations;
 
         if check_exploitability {
+            #[cfg(feature = "logging")]
             let old_exploitability = exploitability;
             exploitability = compute_exploitability(game);
             #[cfg(feature = "logging")]

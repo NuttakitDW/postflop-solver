@@ -375,9 +375,13 @@ impl FileData for BunchingData {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "zstd")]
     use super::*;
+    #[cfg(feature = "zstd")]
     use crate::action_tree::*;
+    #[cfg(feature = "zstd")]
     use crate::card::*;
+    #[cfg(feature = "zstd")]
     use crate::range::*;
 
     #[test]
