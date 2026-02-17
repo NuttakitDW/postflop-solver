@@ -12,3 +12,6 @@
   cargo run --example backend_solver --release \
     --features "bincode rayon zstd jemalloc onnx-coreml" \
     -- config/template.json --deepstack model_2.onnx --device coreml
+
+# Standard DCFR
+make start CONFIG=config/template.json
