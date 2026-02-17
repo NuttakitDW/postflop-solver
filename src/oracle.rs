@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 const NUM_COMBOS: usize = 1326;
-const PER_COMBO_FEATURES: usize = 14;
+const PER_COMBO_FEATURES: usize = 19;
 const GLOBAL_FEATURES: usize = 20;
 /// Fixed batch size for CoreML compatibility (max turn cards = 52 - 3 flop = 49).
 const FIXED_BATCH: usize = 49;
@@ -262,7 +262,7 @@ pub fn build_combo_to_hand(game: &PostFlopGame, player: usize) -> Vec<usize> {
 
 /// Extract combo_features and global_features for a batch of turn cards.
 ///
-/// Returns `(combo_features[batch, 1326, 14], global_features[batch, 20])`.
+/// Returns `(combo_features[batch, 1326, 19], global_features[batch, 20])`.
 ///
 /// `reach_oop_all` and `reach_ip_all` are 1326-element arrays indexed by combo index.
 /// Combos not in a player's range should have reach = 0.0.
@@ -319,7 +319,184 @@ pub fn extract_features(
     (combo_feat, global_feat)
 }
 
-/// Fill the 14 per-combo features for one combo.
+/// Check if a set of ranks (as a bitset) contains a 5-card straight.
+fn check_straight(rank_bits: u16) -> bool {
+    // Regular windows: 5 consecutive ranks (A=12, K=11, ..., 2=0)
+    for start in 0..9 {
+        let mask = 0b11111u16 << start;
+        if rank_bits & mask == mask {
+            return true;
+        }
+    }
+    // Wheel: A(12)-2(0)-3(1)-4(2)-5(3)
+    let wheel = (1u16 << 12) | (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+    rank_bits & wheel == wheel
+}
+
+/// Count straight draw outs for hand + board (6 cards on the turn).
+/// Returns the number of remaining deck cards that would complete a straight.
+fn count_straight_draw_outs(c1: Card, c2: Card, board: &[Card; 4]) -> u8 {
+    let mut rank_bits = 0u16;
+    for &c in [c1, c2].iter().chain(board.iter()) {
+        rank_bits |= 1 << (c >> 2);
+    }
+
+    // If already have a straight, no draw outs
+    if check_straight(rank_bits) {
+        return 0;
+    }
+
+    let mut outs = 0u8;
+    for rank in 0u8..13 {
+        if rank_bits & (1 << rank) != 0 {
+            continue; // rank already present, adding another card of same rank won't help
+        }
+        let new_bits = rank_bits | (1 << rank);
+        if check_straight(new_bits) {
+            // All 4 cards of this rank are available (none in hand or board)
+            outs += 4;
+        }
+    }
+    outs
+}
+
+/// Compute flush-related features for hand + board.
+/// Returns (has_flush_draw, is_nut_flush_draw, has_made_flush).
+/// Only considers flushes where the hand contributes at least one card.
+fn compute_flush_features(c1: Card, c2: Card, board: &[Card; 4]) -> (bool, bool, bool) {
+    let s1 = c1 & 3;
+    let s2 = c2 & 3;
+
+    let mut suit_counts = [0u8; 4];
+    let mut hand_suit_counts = [0u8; 4];
+
+    suit_counts[s1 as usize] += 1;
+    suit_counts[s2 as usize] += 1;
+    hand_suit_counts[s1 as usize] += 1;
+    hand_suit_counts[s2 as usize] += 1;
+
+    for &bc in board.iter() {
+        suit_counts[(bc & 3) as usize] += 1;
+    }
+
+    let mut has_flush_draw = false;
+    let mut has_made_flush = false;
+    let mut is_nut_flush_draw = false;
+
+    for suit in 0..4u8 {
+        if hand_suit_counts[suit as usize] == 0 {
+            continue; // hand must contribute to the flush
+        }
+
+        let total = suit_counts[suit as usize];
+
+        if total >= 5 {
+            has_made_flush = true;
+        } else if total == 4 {
+            has_flush_draw = true;
+
+            // Nut flush draw: hand holds the highest non-board card of this suit
+            let hand_max_rank_in_suit = {
+                let mut max_r = -1i8;
+                if s1 == suit {
+                    max_r = max_r.max((c1 >> 2) as i8);
+                }
+                if s2 == suit {
+                    max_r = max_r.max((c2 >> 2) as i8);
+                }
+                max_r
+            };
+
+            // Find highest card of this suit not on the board
+            let mut highest_non_board = -1i8;
+            for r in (0..13).rev() {
+                let card = (r << 2) | suit;
+                if !board.contains(&card) {
+                    highest_non_board = r as i8;
+                    break;
+                }
+            }
+
+            if hand_max_rank_in_suit == highest_non_board {
+                is_nut_flush_draw = true;
+            }
+        }
+    }
+
+    (has_flush_draw, is_nut_flush_draw, has_made_flush)
+}
+
+/// Compute the made hand rank category for hand + board (best 5 of 6 cards).
+/// Returns a normalized value: high card(0.0), pair(0.2), two pair(0.4),
+/// trips(0.5), straight(0.6), flush(0.7), full house(0.8), quads(0.9), straight flush(1.0).
+fn compute_made_hand_rank(c1: Card, c2: Card, board: &[Card; 4]) -> f32 {
+    let all_cards = [c1, c2, board[0], board[1], board[2], board[3]];
+
+    let mut rank_counts = [0u8; 13];
+    let mut suit_counts = [0u8; 4];
+    let mut rank_bits = 0u16;
+
+    for &c in &all_cards {
+        rank_counts[(c >> 2) as usize] += 1;
+        suit_counts[(c & 3) as usize] += 1;
+        rank_bits |= 1 << (c >> 2);
+    }
+
+    let has_flush = suit_counts.iter().any(|&c| c >= 5);
+    let has_straight = check_straight(rank_bits);
+
+    // Straight flush: flush AND straight in the same suit
+    if has_flush && has_straight {
+        for suit in 0..4u8 {
+            if suit_counts[suit as usize] >= 5 {
+                let mut suit_rank_bits = 0u16;
+                for &c in &all_cards {
+                    if (c & 3) == suit {
+                        suit_rank_bits |= 1 << (c >> 2);
+                    }
+                }
+                if check_straight(suit_rank_bits) {
+                    return 1.0;
+                }
+            }
+        }
+    }
+
+    // Four of a kind
+    if rank_counts.iter().any(|&c| c >= 4) {
+        return 0.9;
+    }
+
+    // Full house: trips + at least one other pair (or two trips)
+    let trips_count = rank_counts.iter().filter(|&&c| c >= 3).count();
+    let pair_or_better_count = rank_counts.iter().filter(|&&c| c >= 2).count();
+    if trips_count >= 1 && pair_or_better_count >= 2 {
+        return 0.8;
+    }
+
+    if has_flush {
+        return 0.7;
+    }
+    if has_straight {
+        return 0.6;
+    }
+    if trips_count >= 1 {
+        return 0.5;
+    }
+
+    // Two pair / one pair
+    let pair_count = rank_counts.iter().filter(|&&c| c == 2).count();
+    if pair_count >= 2 {
+        return 0.4;
+    }
+    if pair_count >= 1 {
+        return 0.2;
+    }
+
+    0.0 // high card
+}
+
+/// Fill the 19 per-combo features for one combo.
 fn fill_combo_features(
     out: &mut [f32],
     c1: Card,
@@ -385,8 +562,34 @@ fn fill_combo_features(
         max_flush as f32 / 5.0
     };
 
-    let hand_strength =
-        (pairs_with_board * 0.1 + is_pair as f32 * 0.05 + overcards * 0.05).min(1.0);
+    // New features
+    let made_hand_rank = if blocked {
+        0.0
+    } else {
+        compute_made_hand_rank(c1, c2, board)
+    };
+
+    let straight_draw_outs = if blocked {
+        0.0
+    } else {
+        (count_straight_draw_outs(c1, c2, board) as f32 / 8.0).min(1.0)
+    };
+
+    let has_made_straight = if blocked {
+        0.0
+    } else {
+        let mut rank_bits = 0u16;
+        for &c in [c1, c2].iter().chain(board.iter()) {
+            rank_bits |= 1 << (c >> 2);
+        }
+        if check_straight(rank_bits) { 1.0 } else { 0.0 }
+    };
+
+    let (has_flush_draw, is_nut_flush_draw, has_made_flush) = if blocked {
+        (false, false, false)
+    } else {
+        compute_flush_features(c1, c2, board)
+    };
 
     out[0] = reach_oop;
     out[1] = reach_ip;
@@ -400,8 +603,13 @@ fn fill_combo_features(
     out[9] = pairs_with_board;
     out[10] = overcards;
     out[11] = flush_potential;
-    out[12] = hand_strength;
+    out[12] = made_hand_rank;
     out[13] = if blocked { 1.0 } else { 0.0 };
+    out[14] = straight_draw_outs;
+    out[15] = has_made_straight;
+    out[16] = if has_flush_draw { 1.0 } else { 0.0 };
+    out[17] = if is_nut_flush_draw { 1.0 } else { 0.0 };
+    out[18] = if has_made_flush { 1.0 } else { 0.0 };
 }
 
 /// Fill the 20 global features for one board configuration.

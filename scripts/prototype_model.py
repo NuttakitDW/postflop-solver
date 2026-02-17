@@ -1,7 +1,7 @@
 """
 CFV prediction model for turn boundary (production architecture, untrained).
 
-Input:  combo_features (batch, 1326, 14) + global_features (batch, 20)
+Input:  combo_features (batch, 1326, 19) + global_features (batch, 20)
 Output: cfv (batch, 1326, 2) — cfv_oop and cfv_ip per combo
 
 Zero-sum enforced: cfv_oop + cfv_ip = 0 for each combo.
@@ -12,7 +12,7 @@ import numpy as np
 
 # Feature dimensions
 NUM_COMBOS = 1326
-PER_COMBO_FEATURES = 14
+PER_COMBO_FEATURES = 19
 GLOBAL_FEATURES = 20
 OUTPUT_DIM = 2  # cfv_oop, cfv_ip
 
@@ -68,7 +68,7 @@ class CFVModel(nn.Module):
     Production CFV prediction model.
 
     Architecture:
-        1. ComboEncoder:  14 -> 256 (per-combo features)
+        1. ComboEncoder:  19 -> 256 (per-combo features)
         2. GlobalEncoder: 20 -> 256 (board/game context)
         3. Merge:         512 -> 256 (project down)
         4. RangeAggregation: capture cross-combo interactions
@@ -130,13 +130,13 @@ class CFVModel(nn.Module):
     def forward(self, combo_features, global_features):
         """
         Args:
-            combo_features:  (batch, 1326, 14)
+            combo_features:  (batch, 1326, 19)
             global_features: (batch, 20)
 
         Returns:
             cfv: (batch, 1326, 2) where cfv[:,:,0] + cfv[:,:,1] = 0 (zero-sum)
         """
-        # Encode per-combo: (batch, 1326, 14) -> (batch, 1326, 256)
+        # Encode per-combo: (batch, 1326, 19) -> (batch, 1326, 256)
         combo_enc = self.combo_encoder(combo_features)
 
         # Encode global: (batch, 20) -> (batch, 256) -> broadcast (batch, 1326, 256)

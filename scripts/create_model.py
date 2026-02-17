@@ -2,7 +2,7 @@
 CFV prediction model v2 — optimized for inference speed.
 
 Same I/O as model_1 for training pipeline compatibility:
-  Input:  combo_features (batch, 1326, 14) + global_features (batch, 20)
+  Input:  combo_features (batch, 1326, 19) + global_features (batch, 20)
   Output: cfv (batch, 1326, 2) — cfv_oop and cfv_ip per combo
 
 Changes from model_1:
@@ -20,7 +20,7 @@ import torch.nn as nn
 import numpy as np
 
 NUM_COMBOS = 1326
-PER_COMBO_FEATURES = 14
+PER_COMBO_FEATURES = 19
 GLOBAL_FEATURES = 20
 OUTPUT_DIM = 2
 
@@ -43,7 +43,7 @@ class CFVModel(nn.Module):
     Fast CFV prediction model.
 
     Architecture:
-        1. ComboEncoder:  14 → 128 (per-combo features)
+        1. ComboEncoder:  19 → 128 (per-combo features)
         2. GlobalEncoder: 20 → 128 (board/game context)
         3. Merge:         256 → 128
         4. ResidualBlocks × 3
@@ -87,7 +87,7 @@ class CFVModel(nn.Module):
                     nn.init.zeros_(m.bias)
 
     def forward(self, combo_features, global_features):
-        # Encode per-combo: (batch, 1326, 14) → (batch, 1326, 128)
+        # Encode per-combo: (batch, 1326, 19) → (batch, 1326, 128)
         combo_enc = self.combo_encoder(combo_features)
 
         # Encode global: (batch, 20) → (batch, 128) → broadcast (batch, 1326, 128)
