@@ -506,25 +506,23 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 }
 
 #[cfg(feature = "onnx")]
-fn run_solver_deepstack(config: &SolverConfig, model_path: &str) -> SolverResult {
-    use postflop_solver::oracle::OnnxOracle;
+fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -> SolverResult {
+    use postflop_solver::oracle::{Device, OnnxOracle};
 
     let total_start = Instant::now();
 
-    // Load oracle with CoreML acceleration and session pool for parallel inference
-    println!("Loading ONNX oracle: {}", model_path);
-    let oracle = match OnnxOracle::new(model_path) {
+    let device: Device = match device.parse() {
+        Ok(d) => d,
+        Err(e) => return create_error_result(e),
+    };
+
+    println!("Loading ONNX oracle: {} (device={})", model_path, device);
+    let oracle = match OnnxOracle::new(model_path, device) {
         Ok(o) => {
-            println!("Oracle loaded (CoreML + CPU, pool={})", o.pool_size());
+            println!("Oracle loaded (device={}, pool={})", o.device(), o.pool_size());
             o
         }
-        Err(_) => match OnnxOracle::new_cpu(model_path) {
-            Ok(o) => {
-                println!("Oracle loaded (CPU only, pool={})", o.pool_size());
-                o
-            }
-            Err(e) => return create_error_result(format!("Failed to load oracle: {}", e)),
-        },
+        Err(e) => return create_error_result(format!("Failed to load oracle: {}", e)),
     };
 
     // Parse ranges
@@ -752,7 +750,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str) -> SolverResult
 }
 
 #[cfg(not(feature = "onnx"))]
-fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str) -> SolverResult {
+fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str, _device: &str) -> SolverResult {
     create_error_result("Deepstack mode requires the 'onnx' feature. Rebuild with --features onnx".to_string())
 }
 
@@ -765,12 +763,13 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <config.json> [--deepstack <model.onnx>]", args[0]);
+        eprintln!("Usage: {} <config.json> [--deepstack <model.onnx>] [--device cpu|cuda|coreml]", args[0]);
         eprintln!("       {} --generate-template", args[0]);
         eprintln!();
         eprintln!("Options:");
         eprintln!("  <config.json>                Path to JSON configuration file");
         eprintln!("  --deepstack <model.onnx>     Use ONNX oracle for turn CFV prediction");
+        eprintln!("  --device <device>            Execution device: cpu, cuda, coreml (default: cpu)");
         eprintln!("  --generate-template          Generate a template config file");
         std::process::exit(1);
     }
@@ -787,20 +786,25 @@ fn main() {
 
     let config_path = &args[1];
 
-    // Parse --deepstack flag
-    let deepstack_model = {
-        let mut model_path = None;
+    // Parse CLI flags
+    let mut deepstack_model = None;
+    let mut device = "cpu".to_string();
+    {
         let mut i = 2;
         while i < args.len() {
-            if args[i] == "--deepstack" && i + 1 < args.len() {
-                model_path = Some(args[i + 1].clone());
-                i += 2;
-            } else {
-                i += 1;
+            match args[i].as_str() {
+                "--deepstack" if i + 1 < args.len() => {
+                    deepstack_model = Some(args[i + 1].clone());
+                    i += 2;
+                }
+                "--device" if i + 1 < args.len() => {
+                    device = args[i + 1].clone();
+                    i += 2;
+                }
+                _ => i += 1,
             }
         }
-        model_path
-    };
+    }
 
     if !Path::new(config_path).exists() {
         eprintln!("Error: Config file not found: {}", config_path);
@@ -817,7 +821,7 @@ fn main() {
     println!("Config: {}", config_path);
     println!("Threads: {}", rayon::current_num_threads());
     if let Some(ref model) = deepstack_model {
-        println!("Mode: DEEPSTACK (oracle: {})", model);
+        println!("Mode: DEEPSTACK (oracle: {}, device: {})", model, device);
     } else {
         println!("Mode: Standard");
     }
@@ -835,7 +839,7 @@ fn main() {
     println!();
 
     let result = if let Some(ref model_path) = deepstack_model {
-        run_solver_deepstack(&config, model_path)
+        run_solver_deepstack(&config, model_path, &device)
     } else {
         run_solver(&config)
     };

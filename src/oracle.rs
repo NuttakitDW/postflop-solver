@@ -17,12 +17,46 @@ const GLOBAL_FEATURES: usize = 20;
 /// Fixed batch size for CoreML compatibility (max turn cards = 52 - 3 flop = 49).
 const FIXED_BATCH: usize = 49;
 
+/// Device selection for ONNX inference execution provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    /// CPU-only execution (always available).
+    Cpu,
+    /// CoreML execution (macOS, requires `onnx-coreml` feature).
+    CoreML,
+    /// CUDA execution (NVIDIA GPU, requires `onnx-cuda` feature).
+    Cuda,
+}
+
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Device::Cpu => write!(f, "cpu"),
+            Device::CoreML => write!(f, "coreml"),
+            Device::Cuda => write!(f, "cuda"),
+        }
+    }
+}
+
+impl std::str::FromStr for Device {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cpu" => Ok(Device::Cpu),
+            "coreml" | "mps" => Ok(Device::CoreML),
+            "cuda" | "gpu" => Ok(Device::Cuda),
+            _ => Err(format!("Unknown device '{}'. Use: cpu, cuda, coreml", s)),
+        }
+    }
+}
+
 /// ONNX-based oracle for predicting CFVs at turn boundary nodes.
 ///
 /// Uses a pool of sessions for concurrent inference from multiple rayon threads.
 pub struct OnnxOracle {
     sessions: Vec<Mutex<Session>>,
     next_idx: AtomicUsize,
+    device: Device,
     /// Total oracle calls (atomic for thread-safe counting).
     call_count: AtomicU64,
     /// Total inference time in microseconds (atomic).
@@ -36,20 +70,13 @@ unsafe impl Send for OnnxOracle {}
 unsafe impl Sync for OnnxOracle {}
 
 impl OnnxOracle {
-    /// Load an ONNX model from file with a pool of sessions.
-    /// Tries CoreML first, falls back to CPU. Pool size = available CPU threads.
-    pub fn new(model_path: &str) -> Result<Self, String> {
+    /// Load an ONNX model with the specified device.
+    pub fn new(model_path: &str, device: Device) -> Result<Self, String> {
         let pool_size = default_pool_size();
-        Self::new_pool(model_path, pool_size, true)
+        Self::new_pool(model_path, pool_size, device)
     }
 
-    /// Load an ONNX model with CPU-only execution and a pool of sessions.
-    pub fn new_cpu(model_path: &str) -> Result<Self, String> {
-        let pool_size = default_pool_size();
-        Self::new_pool(model_path, pool_size, false)
-    }
-
-    fn new_pool(model_path: &str, pool_size: usize, use_coreml: bool) -> Result<Self, String> {
+    fn new_pool(model_path: &str, pool_size: usize, device: Device) -> Result<Self, String> {
         let pool_size = pool_size.max(1);
         let mut sessions = Vec::with_capacity(pool_size);
 
@@ -57,17 +84,44 @@ impl OnnxOracle {
             let builder = Session::builder()
                 .map_err(|e| format!("Failed to create session builder: {}", e))?;
 
-            let builder = if use_coreml {
-                builder
-                    .with_execution_providers([
-                        ort::ep::CoreML::default()
-                            .with_static_input_shapes(true)
-                            .build(),
-                        ort::ep::CPU::default().build(),
-                    ])
-                    .map_err(|e| format!("Failed to set execution providers: {}", e))?
-            } else {
-                builder
+            let builder = match device {
+                Device::Cpu => builder,
+                Device::CoreML => {
+                    #[cfg(feature = "onnx-coreml")]
+                    {
+                        builder
+                            .with_execution_providers([
+                                ort::ep::CoreML::default()
+                                    .with_static_input_shapes(true)
+                                    .build(),
+                                ort::ep::CPU::default().build(),
+                            ])
+                            .map_err(|e| format!("Failed to set CoreML EP: {}", e))?
+                    }
+                    #[cfg(not(feature = "onnx-coreml"))]
+                    {
+                        return Err(
+                            "CoreML not compiled. Rebuild with --features onnx-coreml".into(),
+                        );
+                    }
+                }
+                Device::Cuda => {
+                    #[cfg(feature = "onnx-cuda")]
+                    {
+                        builder
+                            .with_execution_providers([
+                                ort::ep::CUDA::default().build(),
+                                ort::ep::CPU::default().build(),
+                            ])
+                            .map_err(|e| format!("Failed to set CUDA EP: {}", e))?
+                    }
+                    #[cfg(not(feature = "onnx-cuda"))]
+                    {
+                        return Err(
+                            "CUDA not compiled. Rebuild with --features onnx-cuda".into(),
+                        );
+                    }
+                }
             };
 
             let session = builder
@@ -80,6 +134,7 @@ impl OnnxOracle {
         Ok(Self {
             sessions,
             next_idx: AtomicUsize::new(0),
+            device,
             call_count: AtomicU64::new(0),
             inference_us: AtomicU64::new(0),
             feature_us: AtomicU64::new(0),
@@ -89,6 +144,11 @@ impl OnnxOracle {
     /// Number of sessions in the pool.
     pub fn pool_size(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// The device this oracle was configured with.
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Reset profiling counters and return (calls, inference_ms, feature_ms).
