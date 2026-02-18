@@ -175,12 +175,12 @@ if __name__ == "__main__":
     print()
 
     # Export
-    export_onnx(model, "model_2.onnx")
+    export_onnx(model, "models/model_3.onnx")
 
     # Verify ONNX
     try:
         import onnxruntime as ort
-        session = ort.InferenceSession("model_2.onnx")
+        session = ort.InferenceSession("models/model_3.onnx")
         result = session.run(None, {
             "combo_features": combo_features.numpy(),
             "global_features": global_features.numpy(),
