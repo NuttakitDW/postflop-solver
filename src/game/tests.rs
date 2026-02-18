@@ -3,6 +3,8 @@ use crate::range::*;
 use crate::solver::*;
 use crate::utility::*;
 use crate::BunchingData;
+#[cfg(feature = "onnx")]
+use crate::oracle;
 
 #[test]
 fn all_check_all_range() {
@@ -863,4 +865,84 @@ fn solve_pio_preset_raked() {
     // verified by PioSOLVER Free (but not theoretically guaranteed to be the same)
     assert!((root_ev_oop - 95.57).abs() < 0.2);
     assert!((root_ev_ip - 66.98).abs() < 0.2);
+}
+
+#[test]
+#[cfg(feature = "onnx")]
+fn finalize_deepstack_matches_standard_on_turn_game() {
+    // Test that finalize_deepstack produces identical results to standard finalize
+    // when there are no turn chance nodes to intercept (turn-start game).
+    // This verifies all the non-oracle code paths and CFV save logic.
+
+    let model_path = "models/model_2.onnx";
+    if !std::path::Path::new(model_path).exists() {
+        eprintln!("Skipping test: {} not found", model_path);
+        return;
+    }
+
+    let card_config = CardConfig {
+        flop: flop_from_str("Td9d6h").unwrap(),
+        range: [Range::ones(); 2],
+        turn: card_from_str("Qc").unwrap(),
+        ..Default::default()
+    };
+
+    let tree_config = TreeConfig {
+        initial_state: BoardState::Turn,
+        starting_pot: 60,
+        effective_stack: 970,
+        river_bet_sizes: [("50%", "").try_into().unwrap(), Default::default()],
+        ..Default::default()
+    };
+
+    // Standard solve + finalize
+    let action_tree = ActionTree::new(tree_config.clone()).unwrap();
+    let mut game_standard = PostFlopGame::with_config(card_config.clone(), action_tree).unwrap();
+    game_standard.allocate_memory(false);
+    solve(&mut game_standard, 200, 60.0 * 0.01, false);
+
+    game_standard.cache_normalized_weights();
+    let w_oop_std = game_standard.normalized_weights(0).to_vec();
+    let w_ip_std = game_standard.normalized_weights(1).to_vec();
+    let ev_oop_std = compute_average(&game_standard.expected_values(0), &w_oop_std);
+    let ev_ip_std = compute_average(&game_standard.expected_values(1), &w_ip_std);
+
+    // Deepstack solve + finalize_deepstack (no turn chance nodes → oracle never called)
+    let action_tree = ActionTree::new(tree_config).unwrap();
+    let mut game_deepstack = PostFlopGame::with_config(card_config, action_tree).unwrap();
+    game_deepstack.allocate_memory(false);
+
+    let onnx_oracle = oracle::OnnxOracle::new(model_path, oracle::Device::Cpu)
+        .expect("Failed to load oracle");
+
+    // Manually run the same iterations as standard solve, then call finalize_deepstack
+    // Since there are no turn chance nodes, solve_deepstack behaves identically to solve
+    solve_deepstack(&mut game_deepstack, 200, 60.0 * 0.01, false, &onnx_oracle);
+
+    game_deepstack.cache_normalized_weights();
+    let w_oop_ds = game_deepstack.normalized_weights(0).to_vec();
+    let w_ip_ds = game_deepstack.normalized_weights(1).to_vec();
+    let ev_oop_ds = compute_average(&game_deepstack.expected_values(0), &w_oop_ds);
+    let ev_ip_ds = compute_average(&game_deepstack.expected_values(1), &w_ip_ds);
+
+    // Results should be very close. Small differences are expected because
+    // solve() and solve_deepstack() check exploitability at different intervals
+    // (every 10 vs every 50 iterations), so they may stop at different iteration counts.
+    assert!(
+        (ev_oop_std - ev_oop_ds).abs() < 0.5,
+        "OOP EV mismatch: standard={}, deepstack={}",
+        ev_oop_std, ev_oop_ds
+    );
+    assert!(
+        (ev_ip_std - ev_ip_ds).abs() < 0.5,
+        "IP EV mismatch: standard={}, deepstack={}",
+        ev_ip_std, ev_ip_ds
+    );
+
+    // Verify EVs sum to pot (zero-sum sanity check)
+    assert!(
+        (ev_oop_ds + ev_ip_ds - 60.0).abs() < 1e-2,
+        "EVs should sum to pot: OOP={}, IP={}, sum={}",
+        ev_oop_ds, ev_ip_ds, ev_oop_ds + ev_ip_ds
+    );
 }
