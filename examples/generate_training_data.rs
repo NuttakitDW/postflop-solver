@@ -166,8 +166,8 @@ fn process_flop(
             river_bet_sizes: river_bet_sizes.clone(),
             turn_donk_sizes: Some(turn_donk.clone()),
             river_donk_sizes: Some(river_donk.clone()),
-            add_allin_threshold: 1.5,
-            force_allin_threshold: 0.15,
+            add_allin_threshold: 6.0,
+            force_allin_threshold: 0.50,
             merging_threshold: 0.1,
             ..Default::default()
         };
