@@ -27,8 +27,5 @@ CoreML-GPU        2.5ms     70.2ms    121.4ms         27.8x         48.1x
 
 
 # Generate training data
-cargo run --example generate_training_data --release --features "rayon onnx" -- \
-    --num-samples 1 \
-    --target-exploit 0.3 \
-    --output-dir ./training_data \
-    --seed 42
+cargo run --example generate_bucketed_data --release --features "rayon" -- \
+    --output-dir ./bucketed_training_data --num-samples 1 --target-exploit 0.5 --seed 42

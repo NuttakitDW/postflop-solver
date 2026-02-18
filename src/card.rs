@@ -96,7 +96,7 @@ pub fn card_pair_to_index(mut card1: Card, mut card2: Card) -> usize {
 ///
 /// Examples: `0` => 2d2c, `1` => 2h2c , `2` => 2s2c, ..., `1325` => AsAh
 #[inline]
-pub(crate) fn index_to_card_pair(index: usize) -> (Card, Card) {
+pub fn index_to_card_pair(index: usize) -> (Card, Card) {
     let card1 = (103 - (103.0 * 103.0 - 8.0 * index as f64).sqrt().ceil() as u16) / 2;
     let card2 = index as u16 - card1 * (101 - card1) / 2 + 1;
     (card1 as Card, card2 as Card)

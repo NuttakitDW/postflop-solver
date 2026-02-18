@@ -1018,6 +1018,470 @@ pub(crate) fn oracle_predict_turn_cfv(
 }
 
 // =============================================================================
+// Bucketed deepstack solver (uses TurnValueNet instead of OnnxOracle)
+// =============================================================================
+
+#[cfg(feature = "onnx")]
+use crate::bucketing::{
+    compute_board_features, compute_buckets, expand_cfv_from_buckets, project_range_to_buckets,
+    BucketMapping, DEFAULT_K,
+};
+#[cfg(feature = "onnx")]
+use crate::net::TurnValueNet;
+
+/// Pre-computed bucket mappings for all possible turn cards on a given flop.
+#[cfg(feature = "onnx")]
+pub struct BucketCache {
+    /// Indexed by card (0..52). `None` for flop cards.
+    mappings: Vec<Option<BucketMapping>>,
+    k: usize,
+}
+
+#[cfg(feature = "onnx")]
+impl BucketCache {
+    /// Pre-compute bucket mappings for all valid turn cards on the given flop.
+    pub fn new(flop: &[Card; 3], k: usize) -> Self {
+        let flop_mask: u64 = (1u64 << flop[0]) | (1u64 << flop[1]) | (1u64 << flop[2]);
+        let mut mappings: Vec<Option<BucketMapping>> = (0..52).map(|_| None).collect();
+
+        for turn in 0u8..52 {
+            if flop_mask & (1u64 << turn) != 0 {
+                continue;
+            }
+            let board = [flop[0], flop[1], flop[2], turn];
+            mappings[turn as usize] = Some(compute_buckets(&board, k));
+        }
+
+        Self { mappings, k }
+    }
+
+    /// Get the bucket mapping for a given turn card.
+    pub fn get(&self, turn_card: Card) -> &BucketMapping {
+        self.mappings[turn_card as usize]
+            .as_ref()
+            .expect("No bucket mapping for this turn card (likely a flop card)")
+    }
+}
+
+#[cfg(feature = "onnx")]
+/// Solves a postflop game using the bucketed deepstack approach: at turn chance nodes,
+/// the bucketed value network predicts CFVs instead of recursing into turn+river subtrees.
+///
+/// Returns the final exploitability.
+pub fn solve_bucketed(
+    game: &mut PostFlopGame,
+    max_num_iterations: u32,
+    target_exploitability: f32,
+    print_progress: bool,
+    net: &TurnValueNet,
+) -> f32 {
+    if game.is_solved() {
+        panic!("Game is already solved");
+    }
+
+    if !game.is_ready() {
+        panic!("Game is not ready");
+    }
+
+    // Pre-compute bucket mappings for all 49 turn cards
+    let flop = game.card_config().flop;
+    if print_progress {
+        print!("Pre-computing bucket mappings...");
+        io::stdout().flush().unwrap();
+    }
+    let bucket_cache = BucketCache::new(&flop, DEFAULT_K);
+    if print_progress {
+        println!(" done.");
+    }
+
+    let mut root = game.root();
+    let solve_timer = Instant::now();
+    let mut exploitability =
+        compute_exploitability_bucketed(game, net, &bucket_cache);
+    let starting_pot = game.tree_config().starting_pot as f32;
+    let target_percent = if starting_pot > 0.0 {
+        target_exploitability / starting_pot * 100.0
+    } else {
+        0.0
+    };
+
+    if print_progress {
+        print!("iteration: 0 / {max_num_iterations} ");
+        if starting_pot > 0.0 {
+            let current_percent = exploitability / starting_pot * 100.0;
+            print!(
+                "(exploitability = {current_percent:.2}% | target = {target_percent:.2}%) [{:.1}s] [bucketed]",
+                solve_timer.elapsed().as_secs_f64()
+            );
+        }
+        io::stdout().flush().unwrap();
+    }
+
+    for t in 0..max_num_iterations {
+        if exploitability <= target_exploitability {
+            break;
+        }
+
+        let params = DiscountParams::new(t, false);
+
+        for player in 0..2 {
+            let mut result = Vec::with_capacity(game.num_private_hands(player));
+            solve_recursive_bucketed(
+                result.spare_capacity_mut(),
+                game,
+                &mut root,
+                player,
+                game.initial_weights(player ^ 1),
+                &params,
+                net,
+                &bucket_cache,
+            );
+        }
+
+        let check_exploitability = (t + 1) % 50 == 0 || t + 1 == max_num_iterations;
+        if check_exploitability {
+            exploitability = compute_exploitability_bucketed(game, net, &bucket_cache);
+        }
+
+        net.reset_stats();
+
+        if print_progress {
+            print!("\riteration: {} / {} ", t + 1, max_num_iterations);
+            if starting_pot > 0.0 {
+                let current_percent = exploitability / starting_pot * 100.0;
+                print!(
+                    "(exploitability = {current_percent:.2}% | target = {target_percent:.2}%) [{:.1}s] [bucketed]",
+                    solve_timer.elapsed().as_secs_f64(),
+                );
+            }
+            io::stdout().flush().unwrap();
+        }
+    }
+
+    if print_progress {
+        println!();
+        io::stdout().flush().unwrap();
+    }
+
+    finalize_bucketed(game, net, &bucket_cache);
+
+    exploitability
+}
+
+#[cfg(feature = "onnx")]
+fn solve_recursive_bucketed(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    node: &mut PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    params: &DiscountParams,
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) {
+    // Terminal node
+    if node.is_terminal() {
+        game.evaluate(result, node, player, cfreach);
+        return;
+    }
+
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+
+    // Single action pass-through
+    if num_actions == 1 && !node.is_chance() {
+        let child = &mut node.play(0);
+        solve_recursive_bucketed(result, game, child, player, cfreach, params, net, bucket_cache);
+        return;
+    }
+
+    // Turn chance node: use bucketed net instead of recursing into turn+river subtree
+    if node.is_chance() && node.turn() == NOT_DEALT {
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
+        return;
+    }
+
+    let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+    if node.is_chance() {
+        // River chance node: parallel recursive handling
+        let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+        mul_slice_scalar_uninit(
+            cfreach_updated.spare_capacity_mut(),
+            cfreach,
+            1.0 / game.chance_factor(node) as f32,
+        );
+        unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+        for_each_child(node, |action| {
+            solve_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                &cfreach_updated,
+                params,
+                net,
+                bucket_cache,
+            );
+        });
+
+        let mut result_f64 = Vec::with_capacity(num_hands);
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+        unsafe { result_f64.set_len(num_hands) };
+
+        let isomorphic_chances = game.isomorphic_chances(node);
+        for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+            let swap_list = &game.isomorphic_swap(node, i)[player];
+            let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+            apply_swap(tmp, swap_list);
+            result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                *r += v as f64;
+            });
+            apply_swap(tmp, swap_list);
+        }
+
+        result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+            r.write(v as f32);
+        });
+    } else if node.player() == player {
+        // Current player's node: parallel compute + regret update
+        for_each_child(node, |action| {
+            solve_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                cfreach,
+                params,
+                net,
+                bucket_cache,
+            );
+        });
+
+        let mut strategy = if game.is_compression_enabled() {
+            regret_matching_compressed(node.regrets_compressed(), num_actions)
+        } else {
+            regret_matching(node.regrets(), num_actions)
+        };
+
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut strategy, locking);
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+        if game.is_compression_enabled() {
+            let scale = node.strategy_scale();
+            let decoder = params.gamma_t * scale / u16::MAX as f32;
+            let cum_strategy = node.strategy_compressed_mut();
+            strategy.iter_mut().zip(&*cum_strategy).for_each(|(x, y)| {
+                *x += (*y as f32) * decoder;
+            });
+            if !locking.is_empty() {
+                strategy.iter_mut().zip(locking).for_each(|(d, s)| {
+                    if s.is_sign_positive() { *d = 0.0; }
+                })
+            }
+            let new_scale = encode_unsigned_slice(cum_strategy, &strategy);
+            node.set_strategy_scale(new_scale);
+
+            let scale = node.regret_scale();
+            let alpha_decoder = params.alpha_t * scale / i16::MAX as f32;
+            let beta_decoder = params.beta_t * scale / i16::MAX as f32;
+            let cum_regret = node.regrets_compressed_mut();
+            cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
+                *x += *y as f32 * if *y >= 0 { alpha_decoder } else { beta_decoder };
+            });
+            cfv_actions.chunks_exact_mut(num_hands).for_each(|row| {
+                sub_slice(row, result);
+            });
+            if !locking.is_empty() {
+                cfv_actions.iter_mut().zip(locking).for_each(|(d, s)| {
+                    if s.is_sign_positive() { *d = 0.0; }
+                })
+            }
+            let new_scale = encode_signed_slice(cum_regret, &cfv_actions);
+            node.set_regret_scale(new_scale);
+        } else {
+            let gamma = params.gamma_t;
+            let cum_strategy = node.strategy_mut();
+            cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
+                *x = *x * gamma + *y;
+            });
+
+            let (alpha, beta) = (params.alpha_t, params.beta_t);
+            let cum_regret = node.regrets_mut();
+            cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y)| {
+                let coef = if x.is_sign_positive() { alpha } else { beta };
+                *x = *x * coef + *y;
+            });
+            cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
+                sub_slice(row, result);
+            });
+        }
+    } else {
+        // Opponent's node: parallel compute
+        let mut cfreach_actions = if game.is_compression_enabled() {
+            regret_matching_compressed(node.regrets_compressed(), num_actions)
+        } else {
+            regret_matching(node.regrets(), num_actions)
+        };
+
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut cfreach_actions, locking);
+
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        for_each_child(node, |action| {
+            solve_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                row(&cfreach_actions, action, row_size),
+                params,
+                net,
+                bucket_cache,
+            );
+        });
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_uninit(result, &cfv_actions);
+    }
+}
+
+#[cfg(feature = "onnx")]
+/// At a turn chance node, use the bucketed value network to predict CFVs.
+///
+/// For each turn card:
+/// 1. Project ranges to buckets using pre-computed BucketMapping
+/// 2. Build input vector: board_features(15) + range_oop(K) + range_ip(K)
+/// 3. Run network inference
+/// 4. Expand bucket CFVs back to per-combo, then map to per-hand
+pub(crate) fn bucketed_predict_turn_cfv(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    node: &PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) {
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+    let opponent = player ^ 1;
+
+    let pot = game.tree_config().starting_pot as f32;
+    let stack = game.tree_config().effective_stack as f32;
+    let flop = game.card_config().flop;
+
+    // Build full 1326-element reach arrays
+    let mut reach_oop_all = [0.0f32; 1326];
+    let mut reach_ip_all = [0.0f32; 1326];
+
+    let chance_div = 1.0 / game.chance_factor(node) as f32;
+
+    let player_weights = game.initial_weights(player);
+    for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
+        let combo_idx = card_pair_to_index(c1, c2);
+        if player == 0 {
+            reach_oop_all[combo_idx] = player_weights[hand_idx] * chance_div;
+        } else {
+            reach_ip_all[combo_idx] = player_weights[hand_idx] * chance_div;
+        }
+    }
+    for (hand_idx, &(c1, c2)) in game.private_cards(opponent).iter().enumerate() {
+        let combo_idx = card_pair_to_index(c1, c2);
+        if opponent == 0 {
+            reach_oop_all[combo_idx] = cfreach[hand_idx] * chance_div;
+        } else {
+            reach_ip_all[combo_idx] = cfreach[hand_idx] * chance_div;
+        }
+    }
+
+    // Collect turn cards from chance children
+    let mut turn_cards = Vec::with_capacity(num_actions);
+    for action in 0..num_actions {
+        let child = node.play(action);
+        if let Action::Chance(card) = child.prev_action() {
+            turn_cards.push(card);
+        }
+    }
+
+    // For each turn card: bucket → infer → expand
+    let player_cfv_idx = player; // 0 for OOP, 1 for IP
+    let mut result_f64 = vec![0.0f64; num_hands];
+    let mut cfv_actions = vec![0.0f32; num_actions * num_hands];
+    let k = bucket_cache.k;
+
+    for (action, &turn_card) in turn_cards.iter().enumerate() {
+        let board = [flop[0], flop[1], flop[2], turn_card];
+        let mapping = bucket_cache.get(turn_card);
+
+        // Project reaches to buckets
+        let bucket_range_oop = project_range_to_buckets(&reach_oop_all, mapping);
+        let bucket_range_ip = project_range_to_buckets(&reach_ip_all, mapping);
+
+        // Build input: board_features(15) + range_oop(K) + range_ip(K)
+        let board_features = compute_board_features(&board, pot, stack);
+        let mut input = Vec::with_capacity(15 + 2 * k);
+        input.extend_from_slice(&board_features);
+        input.extend_from_slice(&bucket_range_oop);
+        input.extend_from_slice(&bucket_range_ip);
+
+        // Inference
+        let output = net.predict(&input).expect("Net prediction failed");
+
+        // Split output into OOP and IP bucket CFVs
+        let cfv_oop_buckets = &output[..k];
+        let cfv_ip_buckets = &output[k..2 * k];
+
+        // Expand bucket CFVs to per-combo (1326)
+        let cfv_all = if player_cfv_idx == 0 {
+            expand_cfv_from_buckets(cfv_oop_buckets, mapping)
+        } else {
+            expand_cfv_from_buckets(cfv_ip_buckets, mapping)
+        };
+
+        // Map per-combo CFVs to per-hand (solver's hand indexing)
+        for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
+            let combo_idx = card_pair_to_index(c1, c2);
+            let cfv = cfv_all[combo_idx] * pot; // denormalize
+            cfv_actions[action * num_hands + hand_idx] = cfv;
+            result_f64[hand_idx] += cfv as f64;
+        }
+    }
+
+    // Handle isomorphic chances
+    let isomorphic_chances = game.isomorphic_chances(node);
+    for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+        let swap_list = &game.isomorphic_swap(node, i)[player];
+        let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+
+        apply_swap(tmp, swap_list);
+
+        result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+            *r += v as f64;
+        });
+
+        apply_swap(tmp, swap_list);
+    }
+
+    // Write final result
+    result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+        r.write(v as f32);
+    });
+}
+
+// =============================================================================
 // Tests: Mock CFV injection to prove oracle integration correctness
 // =============================================================================
 

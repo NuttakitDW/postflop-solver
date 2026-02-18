@@ -11,8 +11,9 @@ use crate::alloc::*;
 use {
     crate::card::NOT_DEALT,
     crate::game::*,
+    crate::net::TurnValueNet,
     crate::oracle,
-    crate::solver::oracle_predict_turn_cfv,
+    crate::solver::{bucketed_predict_turn_cfv, oracle_predict_turn_cfv, BucketCache},
 };
 
 #[cfg(feature = "rayon")]
@@ -1272,5 +1273,385 @@ pub(crate) fn apply_locking_strategy(dst: &mut [f32], locking: &[f32]) {
                 *d = *s;
             }
         });
+    }
+}
+
+// =============================================================================
+// Bucketed deepstack utility functions
+// =============================================================================
+
+#[cfg(feature = "onnx")]
+pub(crate) fn finalize_bucketed(
+    game: &mut PostFlopGame,
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) {
+    if game.is_solved() {
+        panic!("Game is already solved");
+    }
+
+    if !game.is_ready() {
+        panic!("Game is not ready");
+    }
+
+    for player in 0..2 {
+        let mut cfvalues = Vec::with_capacity(game.num_private_hands(player));
+        compute_cfvalue_recursive_bucketed(
+            cfvalues.spare_capacity_mut(),
+            game,
+            &mut game.root(),
+            player,
+            game.initial_weights(player ^ 1),
+            true,
+            net,
+            bucket_cache,
+        );
+    }
+
+    game.set_solved();
+}
+
+#[cfg(feature = "onnx")]
+pub(crate) fn compute_exploitability_bucketed(
+    game: &PostFlopGame,
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) -> f32 {
+    let mes_ev = compute_mes_ev_bucketed(game, net, bucket_cache);
+    (mes_ev[0] + mes_ev[1]) * 0.5
+}
+
+#[cfg(feature = "onnx")]
+fn compute_mes_ev_bucketed(
+    game: &PostFlopGame,
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) -> [f32; 2] {
+    let mut cfvalues = [
+        Vec::with_capacity(game.num_private_hands(0)),
+        Vec::with_capacity(game.num_private_hands(1)),
+    ];
+
+    let reach = [game.initial_weights(0), game.initial_weights(1)];
+
+    for player in 0..2 {
+        compute_best_cfv_recursive_bucketed(
+            cfvalues[player].spare_capacity_mut(),
+            game,
+            &game.root(),
+            player,
+            reach[player ^ 1],
+            net,
+            bucket_cache,
+        );
+        unsafe { cfvalues[player].set_len(game.num_private_hands(player)) };
+    }
+
+    let get_sum = |player: usize| weighted_sum(&cfvalues[player], reach[player]);
+    [get_sum(0), get_sum(1)]
+}
+
+#[cfg(feature = "onnx")]
+fn compute_cfvalue_recursive_bucketed(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    node: &mut PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    save_cfvalues: bool,
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) {
+    if node.is_terminal() {
+        game.evaluate(result, node, player, cfreach);
+        return;
+    }
+
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+
+    if node.is_chance() && node.turn() == NOT_DEALT {
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
+
+        if save_cfvalues && node.cfvalue_storage_player() == Some(player) {
+            let result = unsafe { &*(result as *const _ as *const [f32]) };
+            if game.is_compression_enabled() {
+                let cfv_scale =
+                    encode_signed_slice(node.cfvalues_chance_compressed_mut(), result);
+                node.set_cfvalue_chance_scale(cfv_scale);
+            } else {
+                node.cfvalues_chance_mut().copy_from_slice(result);
+            }
+        }
+        return;
+    }
+
+    let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+    if node.is_chance() {
+        let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+        mul_slice_scalar_uninit(
+            cfreach_updated.spare_capacity_mut(),
+            cfreach,
+            1.0 / game.chance_factor(node) as f32,
+        );
+        unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+        for_each_child(node, |action| {
+            compute_cfvalue_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                &cfreach_updated,
+                save_cfvalues,
+                net,
+                bucket_cache,
+            );
+        });
+
+        let mut result_f64 = Vec::with_capacity(num_hands);
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+        unsafe { result_f64.set_len(num_hands) };
+
+        let isomorphic_chances = game.isomorphic_chances(node);
+
+        for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+            let swap_list = &game.isomorphic_swap(node, i)[player];
+            let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+
+            apply_swap(tmp, swap_list);
+
+            result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                *r += v as f64;
+            });
+
+            apply_swap(tmp, swap_list);
+        }
+
+        result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+            r.write(v as f32);
+        });
+
+        if save_cfvalues && node.cfvalue_storage_player() == Some(player) {
+            let result = unsafe { &*(result as *const _ as *const [f32]) };
+            if game.is_compression_enabled() {
+                let cfv_scale =
+                    encode_signed_slice(node.cfvalues_chance_compressed_mut(), result);
+                node.set_cfvalue_chance_scale(cfv_scale);
+            } else {
+                node.cfvalues_chance_mut().copy_from_slice(result);
+            }
+        }
+    } else if node.player() == player {
+        for_each_child(node, |action| {
+            compute_cfvalue_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                cfreach,
+                save_cfvalues,
+                net,
+                bucket_cache,
+            );
+        });
+
+        let strategy = if game.is_compression_enabled() {
+            normalized_strategy_compressed(node.strategy_compressed(), num_actions)
+        } else {
+            normalized_strategy(node.strategy(), num_actions)
+        };
+
+        let locking = game.locking_strategy(node);
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+
+        if locking.is_empty() {
+            fma_slices_uninit(result, &strategy, &cfv_actions);
+        } else {
+            let mut strategy = strategy;
+            apply_locking_strategy(&mut strategy, locking);
+            fma_slices_uninit(result, &strategy, &cfv_actions);
+        }
+
+        if save_cfvalues && node.cfvalue_storage_player() == Some(player) {
+            let result = unsafe { &*(result as *const _ as *const [f32]) };
+            if game.is_compression_enabled() {
+                let cfv_scale =
+                    encode_signed_slice(node.cfvalues_compressed_mut(), result);
+                node.set_cfvalue_scale(cfv_scale);
+            } else {
+                node.cfvalues_mut().copy_from_slice(result);
+            }
+        }
+    } else {
+        let mut cfreach_actions = if game.is_compression_enabled() {
+            normalized_strategy_compressed(node.strategy_compressed(), num_actions)
+        } else {
+            normalized_strategy(node.strategy(), num_actions)
+        };
+
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut cfreach_actions, locking);
+
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        for_each_child(node, |action| {
+            compute_cfvalue_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                row(&cfreach_actions, action, row_size),
+                save_cfvalues,
+                net,
+                bucket_cache,
+            );
+        });
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_uninit(result, &cfv_actions);
+    }
+}
+
+#[cfg(feature = "onnx")]
+fn compute_best_cfv_recursive_bucketed(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    node: &PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
+) {
+    if node.is_terminal() {
+        game.evaluate(result, node, player, cfreach);
+        return;
+    }
+
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+
+    if num_actions == 1 && !node.is_chance() {
+        let child = &node.play(0);
+        compute_best_cfv_recursive_bucketed(
+            result, game, child, player, cfreach, net, bucket_cache,
+        );
+        return;
+    }
+
+    if node.is_chance() && node.turn() == NOT_DEALT {
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
+        return;
+    }
+
+    let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+    if node.is_chance() {
+        let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+        mul_slice_scalar_uninit(
+            cfreach_updated.spare_capacity_mut(),
+            cfreach,
+            1.0 / game.chance_factor(node) as f32,
+        );
+        unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+        for_each_child(node, |action| {
+            compute_best_cfv_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &node.play(action),
+                player,
+                &cfreach_updated,
+                net,
+                bucket_cache,
+            )
+        });
+
+        let mut result_f64 = Vec::with_capacity(num_hands);
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+        unsafe { result_f64.set_len(num_hands) };
+
+        let isomorphic_chances = game.isomorphic_chances(node);
+
+        for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+            let swap_list = &game.isomorphic_swap(node, i)[player];
+            let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+
+            apply_swap(tmp, swap_list);
+
+            result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                *r += v as f64;
+            });
+
+            apply_swap(tmp, swap_list);
+        }
+
+        result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+            r.write(v as f32);
+        });
+    } else if node.player() == player {
+        for_each_child(node, |action| {
+            compute_best_cfv_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &node.play(action),
+                player,
+                cfreach,
+                net,
+                bucket_cache,
+            )
+        });
+
+        let locking = game.locking_strategy(node);
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+
+        if locking.is_empty() {
+            max_slices_uninit(result, &cfv_actions);
+        } else {
+            max_fma_slices_uninit(result, &cfv_actions, locking);
+        }
+    } else {
+        let mut cfreach_actions = if game.is_compression_enabled() {
+            normalized_strategy_compressed(node.strategy_compressed(), num_actions)
+        } else {
+            normalized_strategy(node.strategy(), num_actions)
+        };
+
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut cfreach_actions, locking);
+
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        for_each_child(node, |action| {
+            compute_best_cfv_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &node.play(action),
+                player,
+                row(&cfreach_actions, action, row_size),
+                net,
+                bucket_cache,
+            );
+        });
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_uninit(result, &cfv_actions);
     }
 }

@@ -8,3 +8,6 @@ Cargo.lock
 preflop-ranges
 CLAUDE.md
 training_data
+
+todo
+bucketed_training_data
