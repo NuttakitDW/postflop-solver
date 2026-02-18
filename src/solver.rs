@@ -1030,6 +1030,7 @@ mod tests {
     use crate::CardConfig;
     use crate::game::{PostFlopGame, PostFlopNode};
     use crate::range::Range;
+    use crate::BetSizeOptions;
     use std::collections::HashMap;
     use std::mem::MaybeUninit;
     use std::sync::Mutex;
@@ -1841,6 +1842,196 @@ mod tests {
             "Max diff too small ({:.2e}) — corruption not detected",
             max_diff
         );
+    }
+
+    /// Proves that a standalone Turn-start game produces identical CFVs to
+    /// the turn subtree extracted from a Flop-start game.
+    ///
+    /// This validates the fundamental assumption of the training pipeline:
+    /// we can compute turn+river CFVs independently, without a flop tree.
+    #[test]
+    fn test_turn_start_cfv_matches_flop_subtree() {
+        use crate::utility::compute_cfvalue_recursive;
+        use crate::card::card_pair_to_index;
+
+        let flop = flop_from_str("Td9d6h").unwrap();
+        let pot = 55;
+        let stack = 180;
+        let bet: BetSizeOptions = ("50%", "").try_into().unwrap();
+        let empty: BetSizeOptions = ("", "").try_into().unwrap();
+
+        // === Game A: Flop-start with empty flop bets ===
+        let card_config_flop = CardConfig {
+            range: [Range::ones(); 2],
+            flop,
+            turn: NOT_DEALT,
+            river: NOT_DEALT,
+        };
+        let tree_config_flop = TreeConfig {
+            initial_state: BoardState::Flop,
+            starting_pot: pot,
+            effective_stack: stack,
+            flop_bet_sizes: [empty.clone(), empty],
+            turn_bet_sizes: [bet.clone(), bet.clone()],
+            river_bet_sizes: [bet.clone(), bet.clone()],
+            ..Default::default()
+        };
+        let action_tree_flop = ActionTree::new(tree_config_flop).unwrap();
+        let mut game_flop = PostFlopGame::with_config(card_config_flop, action_tree_flop).unwrap();
+        game_flop.allocate_memory(false);
+        solve(&mut game_flop, 500, 0.0, false);
+
+        // Navigate: root -> OOP check -> IP check -> turn chance node
+        let root = game_flop.root();
+        let after_oop_check = root.play(0);
+        let chance_node = after_oop_check.play(0);
+        assert!(chance_node.is_chance(), "Expected chance node after check-check");
+        assert_eq!(chance_node.turn(), NOT_DEALT, "Expected turn chance node");
+
+        // Pick first turn child and identify the turn card
+        let first_child = chance_node.play(0);
+        let turn_card = match first_child.prev_action() {
+            Action::Chance(card) => card,
+            _ => panic!("Expected chance action"),
+        };
+        println!("Testing turn card: {} (id={})",
+            crate::range::card_to_string(turn_card).unwrap(), turn_card);
+
+        // Extract per-hand CFVs from game_flop's turn child for both players
+        // Use opp_initial_weights directly (NOT /45) — we're calling on the child node
+        let mut combo_cfv_flop = [[0.0f32; 1326]; 2];
+        for player in 0..2 {
+            let opponent = player ^ 1;
+            let num_hands = game_flop.num_private_hands(player);
+            let cfreach: Vec<f32> = game_flop.initial_weights(opponent).to_vec();
+
+            let mut result_buf: Vec<MaybeUninit<f32>> = Vec::with_capacity(num_hands);
+            unsafe { result_buf.set_len(num_hands) };
+
+            let mut child = chance_node.play(0);
+            compute_cfvalue_recursive(
+                &mut result_buf,
+                &game_flop,
+                &mut child,
+                player,
+                &cfreach,
+                false,
+            );
+
+            // Map per-hand CFVs to combo indices
+            for (hand_idx, &(c1, c2)) in game_flop.private_cards(player).iter().enumerate() {
+                let combo_idx = card_pair_to_index(c1, c2);
+                combo_cfv_flop[player][combo_idx] = unsafe { result_buf[hand_idx].assume_init() };
+            }
+        }
+
+        // === Game B: Turn-start with same turn card ===
+        let card_config_turn = CardConfig {
+            range: [Range::ones(); 2],
+            flop,
+            turn: turn_card,
+            river: NOT_DEALT,
+        };
+        let tree_config_turn = TreeConfig {
+            initial_state: BoardState::Turn,
+            starting_pot: pot,
+            effective_stack: stack,
+            turn_bet_sizes: [bet.clone(), bet.clone()],
+            river_bet_sizes: [bet.clone(), bet.clone()],
+            ..Default::default()
+        };
+        let action_tree_turn = ActionTree::new(tree_config_turn).unwrap();
+        let mut game_turn = PostFlopGame::with_config(card_config_turn, action_tree_turn).unwrap();
+        game_turn.allocate_memory(false);
+        solve(&mut game_turn, 500, 0.0, false);
+
+        // Extract per-hand CFVs from game_turn's root for both players
+        let mut combo_cfv_turn = [[0.0f32; 1326]; 2];
+        for player in 0..2 {
+            let opponent = player ^ 1;
+            let num_hands = game_turn.num_private_hands(player);
+            let cfreach: Vec<f32> = game_turn.initial_weights(opponent).to_vec();
+
+            let mut result_buf: Vec<MaybeUninit<f32>> = Vec::with_capacity(num_hands);
+            unsafe { result_buf.set_len(num_hands) };
+
+            let mut root = game_turn.root();
+            compute_cfvalue_recursive(
+                &mut result_buf,
+                &game_turn,
+                &mut root,
+                player,
+                &cfreach,
+                false,
+            );
+
+            // Map per-hand CFVs to combo indices
+            for (hand_idx, &(c1, c2)) in game_turn.private_cards(player).iter().enumerate() {
+                let combo_idx = card_pair_to_index(c1, c2);
+                combo_cfv_turn[player][combo_idx] = unsafe { result_buf[hand_idx].assume_init() };
+            }
+        }
+
+        // === Compare at combo level ===
+        let mut max_diff: f32 = 0.0;
+        let mut total_compared = 0usize;
+        let mut mismatches = 0usize;
+        let tolerance = 0.01; // Allow small convergence differences
+
+        for player in 0..2 {
+            for combo_idx in 0..1326 {
+                let cfv_flop = combo_cfv_flop[player][combo_idx];
+                let cfv_turn = combo_cfv_turn[player][combo_idx];
+
+                // Skip combos that are zero in both (blocked by board cards)
+                if cfv_flop == 0.0 && cfv_turn == 0.0 {
+                    continue;
+                }
+
+                total_compared += 1;
+                let diff = (cfv_flop - cfv_turn).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                if diff > tolerance {
+                    mismatches += 1;
+                    if mismatches <= 5 {
+                        let (c1, c2) = crate::card::index_to_card_pair(combo_idx);
+                        println!(
+                            "MISMATCH player={} combo=({},{}) idx={}: flop={:.6} turn={:.6} diff={:.6}",
+                            player,
+                            crate::range::card_to_string(c1).unwrap(),
+                            crate::range::card_to_string(c2).unwrap(),
+                            combo_idx, cfv_flop, cfv_turn, diff
+                        );
+                    }
+                }
+            }
+        }
+
+        println!(
+            "Compared {} non-zero combo CFVs, max diff = {:.6e}, mismatches > {}: {}",
+            total_compared, max_diff, tolerance, mismatches
+        );
+
+        assert!(
+            max_diff < tolerance,
+            "CFV mismatch too large: max_diff={:.6e} (tolerance={:.6e}), {} mismatches out of {} compared",
+            max_diff, tolerance, mismatches, total_compared
+        );
+
+        // Also verify non-trivial values exist
+        let nonzero_flop: usize = combo_cfv_flop.iter()
+            .flat_map(|a| a.iter())
+            .filter(|&&v| v != 0.0)
+            .count();
+        let nonzero_turn: usize = combo_cfv_turn.iter()
+            .flat_map(|a| a.iter())
+            .filter(|&&v| v != 0.0)
+            .count();
+        println!("Non-zero CFVs: flop={}, turn={}", nonzero_flop, nonzero_turn);
+        assert!(nonzero_flop > 100, "Too few non-zero flop CFVs");
+        assert!(nonzero_turn > 100, "Too few non-zero turn CFVs");
     }
 }
 
