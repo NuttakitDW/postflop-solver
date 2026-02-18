@@ -1017,3 +1017,830 @@ pub(crate) fn oracle_predict_turn_cfv(
     });
 }
 
+// =============================================================================
+// Tests: Mock CFV injection to prove oracle integration correctness
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action_tree::*;
+    use crate::card::NOT_DEALT;
+    use crate::range::flop_from_str;
+    use crate::CardConfig;
+    use crate::game::{PostFlopGame, PostFlopNode};
+    use crate::range::Range;
+    use std::collections::HashMap;
+    use std::mem::MaybeUninit;
+    use std::sync::Mutex;
+
+    type CfvMap = HashMap<(usize, usize), Vec<f32>>;
+
+    fn node_key(node: &PostFlopNode) -> usize {
+        node as *const PostFlopNode as usize
+    }
+
+    /// Identical to `solve_recursive` but specialized for PostFlopGame.
+    /// At turn chance nodes, delegates to the original `solve_recursive` for the
+    /// full subtree computation, then captures the result into a shared HashMap.
+    fn solve_recursive_capture(
+        result: &mut [MaybeUninit<f32>],
+        game: &PostFlopGame,
+        node: &mut PostFlopNode,
+        player: usize,
+        cfreach: &[f32],
+        params: &DiscountParams,
+        captured: &Mutex<CfvMap>,
+    ) {
+        if node.is_terminal() {
+            game.evaluate(result, node, player, cfreach);
+            return;
+        }
+
+        let num_actions = node.num_actions();
+        let num_hands = result.len();
+
+        if num_actions == 1 && !node.is_chance() {
+            let child = &mut node.play(0);
+            solve_recursive_capture(result, game, child, player, cfreach, params, captured);
+            return;
+        }
+
+        // Turn chance node: use standard solve_recursive, then capture the result
+        if node.is_chance() && node.turn() == NOT_DEALT {
+            solve_recursive(result, game, node, player, cfreach, params);
+
+            // Capture the computed CFVs
+            let key = (node_key(node), player);
+            let result_vec: Vec<f32> = result
+                .iter()
+                .map(|r| unsafe { r.assume_init() })
+                .collect();
+            captured.lock().unwrap().insert(key, result_vec);
+            return;
+        }
+
+        let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+        // River chance node
+        if node.is_chance() {
+            let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+            mul_slice_scalar_uninit(
+                cfreach_updated.spare_capacity_mut(),
+                cfreach,
+                1.0 / game.chance_factor(node) as f32,
+            );
+            unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+            for_each_child(node, |action| {
+                solve_recursive_capture(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    &cfreach_updated,
+                    params,
+                    captured,
+                );
+            });
+
+            let mut result_f64 = Vec::with_capacity(num_hands);
+            let mut cfv_actions = cfv_actions.lock();
+            unsafe { cfv_actions.set_len(num_actions * num_hands) };
+            sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+            unsafe { result_f64.set_len(num_hands) };
+
+            let isomorphic_chances = game.isomorphic_chances(node);
+            for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+                let swap_list = &game.isomorphic_swap(node, i)[player];
+                let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+                apply_swap(tmp, swap_list);
+                result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                    *r += v as f64;
+                });
+                apply_swap(tmp, swap_list);
+            }
+
+            result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+                r.write(v as f32);
+            });
+        }
+        // Current player
+        else if node.player() == player {
+            for_each_child(node, |action| {
+                solve_recursive_capture(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    cfreach,
+                    params,
+                    captured,
+                );
+            });
+
+            let mut strategy = if game.is_compression_enabled() {
+                regret_matching_compressed(node.regrets_compressed(), num_actions)
+            } else {
+                regret_matching(node.regrets(), num_actions)
+            };
+
+            let locking = game.locking_strategy(node);
+            apply_locking_strategy(&mut strategy, locking);
+
+            let mut cfv_actions = cfv_actions.lock();
+            unsafe { cfv_actions.set_len(num_actions * num_hands) };
+            let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+            if game.is_compression_enabled() {
+                let scale = node.strategy_scale();
+                let decoder = params.gamma_t * scale / u16::MAX as f32;
+                let cum_strategy = node.strategy_compressed_mut();
+                strategy.iter_mut().zip(&*cum_strategy).for_each(|(x, y)| {
+                    *x += (*y as f32) * decoder;
+                });
+                if !locking.is_empty() {
+                    strategy.iter_mut().zip(locking).for_each(|(d, s)| {
+                        if s.is_sign_positive() {
+                            *d = 0.0;
+                        }
+                    })
+                }
+                let new_scale = encode_unsigned_slice(cum_strategy, &strategy);
+                node.set_strategy_scale(new_scale);
+
+                let scale = node.regret_scale();
+                let alpha_decoder = params.alpha_t * scale / i16::MAX as f32;
+                let beta_decoder = params.beta_t * scale / i16::MAX as f32;
+                let cum_regret = node.regrets_compressed_mut();
+                cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
+                    *x += *y as f32 * if *y >= 0 { alpha_decoder } else { beta_decoder };
+                });
+                cfv_actions.chunks_exact_mut(num_hands).for_each(|row| {
+                    sub_slice(row, result);
+                });
+                if !locking.is_empty() {
+                    cfv_actions.iter_mut().zip(locking).for_each(|(d, s)| {
+                        if s.is_sign_positive() {
+                            *d = 0.0;
+                        }
+                    })
+                }
+                let new_scale = encode_signed_slice(cum_regret, &cfv_actions);
+                node.set_regret_scale(new_scale);
+            } else {
+                let gamma = params.gamma_t;
+                let cum_strategy = node.strategy_mut();
+                cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
+                    *x = *x * gamma + *y;
+                });
+
+                let (alpha, beta) = (params.alpha_t, params.beta_t);
+                let cum_regret = node.regrets_mut();
+                cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y): (&mut f32, &f32)| {
+                    let coef = if x.is_sign_positive() { alpha } else { beta };
+                    *x = *x * coef + *y;
+                });
+                cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
+                    sub_slice(row, result);
+                });
+            }
+        }
+        // Opponent
+        else {
+            let mut cfreach_actions = if game.is_compression_enabled() {
+                regret_matching_compressed(node.regrets_compressed(), num_actions)
+            } else {
+                regret_matching(node.regrets(), num_actions)
+            };
+
+            let locking = game.locking_strategy(node);
+            apply_locking_strategy(&mut cfreach_actions, locking);
+
+            let row_size = cfreach.len();
+            cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+                mul_slice(row, cfreach);
+            });
+
+            for_each_child(node, |action| {
+                solve_recursive_capture(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    row(&cfreach_actions, action, row_size),
+                    params,
+                    captured,
+                );
+            });
+
+            let mut cfv_actions = cfv_actions.lock();
+            unsafe { cfv_actions.set_len(num_actions * num_hands) };
+            sum_slices_uninit(result, &cfv_actions);
+        }
+    }
+
+    /// Identical to `solve_recursive` but specialized for PostFlopGame.
+    /// At turn chance nodes, injects pre-captured CFVs instead of recursing.
+    fn solve_recursive_mock(
+        result: &mut [MaybeUninit<f32>],
+        game: &PostFlopGame,
+        node: &mut PostFlopNode,
+        player: usize,
+        cfreach: &[f32],
+        params: &DiscountParams,
+        captured: &CfvMap,
+    ) {
+        if node.is_terminal() {
+            game.evaluate(result, node, player, cfreach);
+            return;
+        }
+
+        let num_actions = node.num_actions();
+        let num_hands = result.len();
+
+        if num_actions == 1 && !node.is_chance() {
+            let child = &mut node.play(0);
+            solve_recursive_mock(result, game, child, player, cfreach, params, captured);
+            return;
+        }
+
+        // Turn chance node: inject captured CFVs
+        if node.is_chance() && node.turn() == NOT_DEALT {
+            let key = (node_key(node), player);
+            let cfv = captured
+                .get(&key)
+                .expect("Missing captured CFV for turn chance node");
+            assert_eq!(cfv.len(), num_hands);
+            result.iter_mut().zip(cfv.iter()).for_each(|(r, &v)| {
+                r.write(v);
+            });
+            return;
+        }
+
+        let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+        // River chance node
+        if node.is_chance() {
+            let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+            mul_slice_scalar_uninit(
+                cfreach_updated.spare_capacity_mut(),
+                cfreach,
+                1.0 / game.chance_factor(node) as f32,
+            );
+            unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+            for_each_child(node, |action| {
+                solve_recursive_mock(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    &cfreach_updated,
+                    params,
+                    captured,
+                );
+            });
+
+            let mut result_f64 = Vec::with_capacity(num_hands);
+            let mut cfv_actions = cfv_actions.lock();
+            unsafe { cfv_actions.set_len(num_actions * num_hands) };
+            sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+            unsafe { result_f64.set_len(num_hands) };
+
+            let isomorphic_chances = game.isomorphic_chances(node);
+            for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+                let swap_list = &game.isomorphic_swap(node, i)[player];
+                let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+                apply_swap(tmp, swap_list);
+                result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                    *r += v as f64;
+                });
+                apply_swap(tmp, swap_list);
+            }
+
+            result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+                r.write(v as f32);
+            });
+        }
+        // Current player
+        else if node.player() == player {
+            for_each_child(node, |action| {
+                solve_recursive_mock(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    cfreach,
+                    params,
+                    captured,
+                );
+            });
+
+            let mut strategy = if game.is_compression_enabled() {
+                regret_matching_compressed(node.regrets_compressed(), num_actions)
+            } else {
+                regret_matching(node.regrets(), num_actions)
+            };
+
+            let locking = game.locking_strategy(node);
+            apply_locking_strategy(&mut strategy, locking);
+
+            let mut cfv_actions = cfv_actions.lock();
+            unsafe { cfv_actions.set_len(num_actions * num_hands) };
+            let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+            if game.is_compression_enabled() {
+                let scale = node.strategy_scale();
+                let decoder = params.gamma_t * scale / u16::MAX as f32;
+                let cum_strategy = node.strategy_compressed_mut();
+                strategy.iter_mut().zip(&*cum_strategy).for_each(|(x, y)| {
+                    *x += (*y as f32) * decoder;
+                });
+                if !locking.is_empty() {
+                    strategy.iter_mut().zip(locking).for_each(|(d, s)| {
+                        if s.is_sign_positive() {
+                            *d = 0.0;
+                        }
+                    })
+                }
+                let new_scale = encode_unsigned_slice(cum_strategy, &strategy);
+                node.set_strategy_scale(new_scale);
+
+                let scale = node.regret_scale();
+                let alpha_decoder = params.alpha_t * scale / i16::MAX as f32;
+                let beta_decoder = params.beta_t * scale / i16::MAX as f32;
+                let cum_regret = node.regrets_compressed_mut();
+                cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
+                    *x += *y as f32 * if *y >= 0 { alpha_decoder } else { beta_decoder };
+                });
+                cfv_actions.chunks_exact_mut(num_hands).for_each(|row| {
+                    sub_slice(row, result);
+                });
+                if !locking.is_empty() {
+                    cfv_actions.iter_mut().zip(locking).for_each(|(d, s)| {
+                        if s.is_sign_positive() {
+                            *d = 0.0;
+                        }
+                    })
+                }
+                let new_scale = encode_signed_slice(cum_regret, &cfv_actions);
+                node.set_regret_scale(new_scale);
+            } else {
+                let gamma = params.gamma_t;
+                let cum_strategy = node.strategy_mut();
+                cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
+                    *x = *x * gamma + *y;
+                });
+
+                let (alpha, beta) = (params.alpha_t, params.beta_t);
+                let cum_regret = node.regrets_mut();
+                cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y): (&mut f32, &f32)| {
+                    let coef = if x.is_sign_positive() { alpha } else { beta };
+                    *x = *x * coef + *y;
+                });
+                cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
+                    sub_slice(row, result);
+                });
+            }
+        }
+        // Opponent
+        else {
+            let mut cfreach_actions = if game.is_compression_enabled() {
+                regret_matching_compressed(node.regrets_compressed(), num_actions)
+            } else {
+                regret_matching(node.regrets(), num_actions)
+            };
+
+            let locking = game.locking_strategy(node);
+            apply_locking_strategy(&mut cfreach_actions, locking);
+
+            let row_size = cfreach.len();
+            cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+                mul_slice(row, cfreach);
+            });
+
+            for_each_child(node, |action| {
+                solve_recursive_mock(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    row(&cfreach_actions, action, row_size),
+                    params,
+                    captured,
+                );
+            });
+
+            let mut cfv_actions = cfv_actions.lock();
+            unsafe { cfv_actions.set_len(num_actions * num_hands) };
+            sum_slices_uninit(result, &cfv_actions);
+        }
+    }
+
+    /// Traverse flop-level nodes (stop at turn chance nodes).
+    /// Collects (node_key, regrets) for every flop player node.
+    fn collect_flop_regrets(
+        node: &PostFlopNode,
+        regrets: &mut Vec<(usize, Vec<f32>)>,
+    ) {
+        if node.is_terminal() {
+            return;
+        }
+        // Stop at turn chance nodes
+        if node.is_chance() && node.turn() == NOT_DEALT {
+            return;
+        }
+        // Collect regrets from player nodes with >1 action
+        if !node.is_chance() && node.num_actions() > 1 {
+            regrets.push((node_key(node), node.regrets().to_vec()));
+        }
+        for action in 0..node.num_actions() {
+            let child = node.play(action);
+            collect_flop_regrets(&child, regrets);
+        }
+    }
+
+    /// Zero all regrets and strategy at every player node in the tree.
+    fn reset_tree(node: &mut PostFlopNode) {
+        if node.is_terminal() {
+            return;
+        }
+        if !node.is_chance() {
+            let regrets = node.regrets_mut();
+            regrets.fill(0.0);
+            let strategy = node.strategy_mut();
+            strategy.fill(0.0);
+        }
+        for action in 0..node.num_actions() {
+            let mut child = node.play(action);
+            reset_tree(&mut child);
+        }
+    }
+
+    /// Proves that injecting exact turn-chance-node CFVs from standard DCFR
+    /// into the mock (deepstack-style) solver produces bit-exact identical
+    /// flop regrets. This validates the oracle integration approach.
+    #[test]
+    fn test_mock_cfv_identical_flop_regrets() {
+        let card_config = CardConfig {
+            range: [Range::ones(); 2],
+            flop: flop_from_str("Td9d6h").unwrap(),
+            ..Default::default()
+        };
+
+        let tree_config = TreeConfig {
+            starting_pot: 55,
+            effective_stack: 180,
+            flop_bet_sizes: [
+                ("50%", "").try_into().unwrap(),
+                ("50%", "").try_into().unwrap(),
+            ],
+            turn_bet_sizes: [
+                ("50%", "").try_into().unwrap(),
+                ("50%", "").try_into().unwrap(),
+            ],
+            river_bet_sizes: [
+                ("50%", "").try_into().unwrap(),
+                ("50%", "").try_into().unwrap(),
+            ],
+            ..Default::default()
+        };
+
+        let action_tree = ActionTree::new(tree_config).unwrap();
+        let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
+        game.allocate_memory(false);
+
+        // === Run 1: standard DCFR with CFV capture at turn chance nodes ===
+        let captured = Mutex::new(CfvMap::new());
+        let params = DiscountParams::new(0, false);
+
+        {
+            let mut root = game.root();
+            for player in 0..2 {
+                let mut result = Vec::with_capacity(game.num_private_hands(player));
+                solve_recursive_capture(
+                    result.spare_capacity_mut(),
+                    &game,
+                    &mut root,
+                    player,
+                    game.initial_weights(player ^ 1),
+                    &params,
+                    &captured,
+                );
+            }
+        }
+
+        // Collect flop regrets from capture run
+        let regrets_capture = {
+            let root = game.root();
+            let mut regrets = Vec::new();
+            collect_flop_regrets(&root, &mut regrets);
+            regrets
+        };
+
+        // === Reset tree storage ===
+        {
+            let mut root = game.root();
+            reset_tree(&mut root);
+        }
+
+        // === Sanity check: values are non-trivial ===
+        let captured_map = captured.into_inner().unwrap();
+        assert!(
+            captured_map.len() > 0,
+            "No CFVs captured — no turn chance nodes found"
+        );
+
+        // Verify captured CFVs are not all zeros
+        let mut cfv_nonzero_count = 0usize;
+        let mut cfv_total_count = 0usize;
+        let mut cfv_min = f32::MAX;
+        let mut cfv_max = f32::MIN;
+        for cfv_vec in captured_map.values() {
+            for &v in cfv_vec {
+                cfv_total_count += 1;
+                if v != 0.0 {
+                    cfv_nonzero_count += 1;
+                }
+                cfv_min = cfv_min.min(v);
+                cfv_max = cfv_max.max(v);
+            }
+        }
+        println!(
+            "Captured CFVs: {} pairs, {} values, {} non-zero ({:.1}%), range [{:.4}, {:.4}]",
+            captured_map.len(),
+            cfv_total_count,
+            cfv_nonzero_count,
+            cfv_nonzero_count as f64 / cfv_total_count as f64 * 100.0,
+            cfv_min,
+            cfv_max,
+        );
+        assert!(
+            cfv_nonzero_count > cfv_total_count / 2,
+            "Captured CFVs are mostly zeros ({}/{})",
+            cfv_nonzero_count,
+            cfv_total_count
+        );
+
+        // Verify capture-run regrets are not all zeros
+        let mut reg_nonzero_count = 0usize;
+        let mut reg_total_count = 0usize;
+        let mut reg_min = f32::MAX;
+        let mut reg_max = f32::MIN;
+        for (_, reg) in &regrets_capture {
+            for &v in reg {
+                reg_total_count += 1;
+                if v != 0.0 {
+                    reg_nonzero_count += 1;
+                }
+                reg_min = reg_min.min(v);
+                reg_max = reg_max.max(v);
+            }
+        }
+        println!(
+            "Capture regrets: {} nodes, {} values, {} non-zero ({:.1}%), range [{:.4}, {:.4}]",
+            regrets_capture.len(),
+            reg_total_count,
+            reg_nonzero_count,
+            reg_nonzero_count as f64 / reg_total_count as f64 * 100.0,
+            reg_min,
+            reg_max,
+        );
+        assert!(
+            reg_nonzero_count > reg_total_count / 2,
+            "Capture regrets are mostly zeros ({}/{})",
+            reg_nonzero_count,
+            reg_total_count
+        );
+
+        // === Run 2: mock DCFR injecting captured CFVs at turn chance nodes ===
+        println!(
+            "\nInjecting {} captured CFV vectors into mock solver...",
+            captured_map.len()
+        );
+
+        {
+            let mut root = game.root();
+            for player in 0..2 {
+                let mut result = Vec::with_capacity(game.num_private_hands(player));
+                solve_recursive_mock(
+                    result.spare_capacity_mut(),
+                    &game,
+                    &mut root,
+                    player,
+                    game.initial_weights(player ^ 1),
+                    &params,
+                    &captured_map,
+                );
+            }
+        }
+
+        // Collect flop regrets from mock run
+        let regrets_mock = {
+            let root = game.root();
+            let mut regrets = Vec::new();
+            collect_flop_regrets(&root, &mut regrets);
+            regrets
+        };
+
+        // === Compare ===
+        assert_eq!(
+            regrets_capture.len(),
+            regrets_mock.len(),
+            "Different number of flop player nodes"
+        );
+        assert!(
+            !regrets_capture.is_empty(),
+            "No flop player nodes found — tree has no flop decisions"
+        );
+
+        let mut max_diff: f32 = 0.0;
+        let mut total_values = 0usize;
+        let mut mismatches = 0usize;
+
+        for ((key_c, reg_c), (key_m, reg_m)) in
+            regrets_capture.iter().zip(regrets_mock.iter())
+        {
+            assert_eq!(key_c, key_m, "Node traversal order mismatch");
+            assert_eq!(
+                reg_c.len(),
+                reg_m.len(),
+                "Different regret lengths at node {:#x}",
+                key_c
+            );
+            for (i, (&c, &m)) in reg_c.iter().zip(reg_m.iter()).enumerate() {
+                total_values += 1;
+                let diff = (c - m).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                if c.to_bits() != m.to_bits() {
+                    mismatches += 1;
+                    if mismatches <= 5 {
+                        println!(
+                            "MISMATCH node {:#x} index {}: capture={} mock={}",
+                            key_c, i, c, m
+                        );
+                    }
+                }
+            }
+        }
+
+        println!(
+            "Compared {} flop nodes, {} total regret values",
+            regrets_capture.len(),
+            total_values
+        );
+        println!(
+            "Mismatches: {} / {} (max diff: {:.2e})",
+            mismatches, total_values, max_diff
+        );
+
+        assert_eq!(
+            mismatches, 0,
+            "Found {} bit-level mismatches out of {} values (max diff: {:.2e})",
+            mismatches, total_values, max_diff
+        );
+    }
+
+    /// Negative test: corrupt captured CFVs, verify the mock produces different regrets.
+    /// Proves the test framework actually detects errors.
+    #[test]
+    fn test_mock_cfv_corrupted_detects_mismatch() {
+        let card_config = CardConfig {
+            range: [Range::ones(); 2],
+            flop: flop_from_str("Td9d6h").unwrap(),
+            ..Default::default()
+        };
+
+        let tree_config = TreeConfig {
+            starting_pot: 55,
+            effective_stack: 180,
+            flop_bet_sizes: [
+                ("50%", "").try_into().unwrap(),
+                ("50%", "").try_into().unwrap(),
+            ],
+            turn_bet_sizes: [
+                ("50%", "").try_into().unwrap(),
+                ("50%", "").try_into().unwrap(),
+            ],
+            river_bet_sizes: [
+                ("50%", "").try_into().unwrap(),
+                ("50%", "").try_into().unwrap(),
+            ],
+            ..Default::default()
+        };
+
+        let action_tree = ActionTree::new(tree_config).unwrap();
+        let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
+        game.allocate_memory(false);
+
+        // === Run 1: capture ground truth ===
+        let captured = Mutex::new(CfvMap::new());
+        let params = DiscountParams::new(0, false);
+
+        {
+            let mut root = game.root();
+            for player in 0..2 {
+                let mut result = Vec::with_capacity(game.num_private_hands(player));
+                solve_recursive_capture(
+                    result.spare_capacity_mut(),
+                    &game,
+                    &mut root,
+                    player,
+                    game.initial_weights(player ^ 1),
+                    &params,
+                    &captured,
+                );
+            }
+        }
+
+        let regrets_capture = {
+            let root = game.root();
+            let mut regrets = Vec::new();
+            collect_flop_regrets(&root, &mut regrets);
+            regrets
+        };
+
+        // === Corrupt the captured CFVs ===
+        let mut corrupted_map = captured.into_inner().unwrap();
+        let mut corrupted_count = 0usize;
+        for cfv_vec in corrupted_map.values_mut() {
+            for v in cfv_vec.iter_mut() {
+                if *v != 0.0 {
+                    *v *= 1.1; // 10% perturbation
+                    corrupted_count += 1;
+                }
+            }
+        }
+        println!("Corrupted {} non-zero CFV values by 10%", corrupted_count);
+
+        // === Reset and run mock with corrupted CFVs ===
+        {
+            let mut root = game.root();
+            reset_tree(&mut root);
+        }
+
+        {
+            let mut root = game.root();
+            for player in 0..2 {
+                let mut result = Vec::with_capacity(game.num_private_hands(player));
+                solve_recursive_mock(
+                    result.spare_capacity_mut(),
+                    &game,
+                    &mut root,
+                    player,
+                    game.initial_weights(player ^ 1),
+                    &params,
+                    &corrupted_map,
+                );
+            }
+        }
+
+        let regrets_corrupted = {
+            let root = game.root();
+            let mut regrets = Vec::new();
+            collect_flop_regrets(&root, &mut regrets);
+            regrets
+        };
+
+        // === Verify mismatches are detected ===
+        let mut mismatches = 0usize;
+        let mut total_values = 0usize;
+        let mut max_diff: f32 = 0.0;
+
+        for ((_, reg_c), (_, reg_m)) in
+            regrets_capture.iter().zip(regrets_corrupted.iter())
+        {
+            for (&c, &m) in reg_c.iter().zip(reg_m.iter()) {
+                total_values += 1;
+                let diff = (c - m).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                if c.to_bits() != m.to_bits() {
+                    mismatches += 1;
+                }
+            }
+        }
+
+        println!(
+            "Corrupted test: {} / {} mismatches (max diff: {:.4e})",
+            mismatches, total_values, max_diff
+        );
+
+        assert!(
+            mismatches > total_values / 2,
+            "Expected majority of values to differ with corrupted CFVs, but only {}/{} mismatched",
+            mismatches,
+            total_values,
+        );
+        assert!(
+            max_diff > 1e-6,
+            "Max diff too small ({:.2e}) — corruption not detected",
+            max_diff
+        );
+    }
+}
+
