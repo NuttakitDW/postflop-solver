@@ -929,6 +929,9 @@ pub(crate) fn oracle_predict_turn_cfv(
     let num_hands = result.len();
     let opponent = player ^ 1;
 
+    // Denormalization factor: model outputs pot-normalized CFVs, multiply by pot to get chips
+    let pot = game.tree_config().starting_pot as f32;
+
     // Build full 1326-element reach arrays from solver's per-hand arrays
     let mut reach_oop_all = vec![0.0f32; 1326];
     let mut reach_ip_all = vec![0.0f32; 1326];
@@ -987,7 +990,7 @@ pub(crate) fn oracle_predict_turn_cfv(
 
         for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
             let combo_idx = card_pair_to_index(c1, c2);
-            let cfv = oracle_output[batch_offset + combo_idx * 2 + player_cfv_idx];
+            let cfv = oracle_output[batch_offset + combo_idx * 2 + player_cfv_idx] * pot;
             cfv_actions[action * num_hands + hand_idx] = cfv;
             result_f64[hand_idx] += cfv as f64;
         }

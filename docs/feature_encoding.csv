@@ -1,0 +1,40 @@
+group,index,name,encoding,range,reason
+combo,0,reach_oop,raw value,[0.0 - 1.0],already bounded by definition (probability)
+combo,1,reach_ip,raw value,[0.0 - 1.0],already bounded by definition (probability)
+combo,2,card1_rank,rank / 12,[0.0 - 1.0],13 ranks (2=0 to A=12) linearly mapped
+combo,3,card2_rank,rank / 12,[0.0 - 1.0],13 ranks (2=0 to A=12) linearly mapped
+combo,4,is_pair,binary,{0.0 or 1.0},categorical flag
+combo,5,is_suited,binary,{0.0 or 1.0},categorical flag
+combo,6,rank_gap,|rank1 - rank2| / 12,[0.0 - 1.0],max gap is 12 (2 vs A)
+combo,7,suit_with_board_c1,count × 0.25,[0.0 - 1.0],0-4 board cards can match suit; ×0.25 normalizes to [0-1]
+combo,8,suit_with_board_c2,count × 0.25,[0.0 - 1.0],0-4 board cards can match suit; ×0.25 normalizes to [0-1]
+combo,9,pairs_with_board,count / 4,[0.0 - 1.0],0-4 board cards can share rank with hand; /4 normalizes
+combo,10,overcards,count × 0.5,{0.0 or 0.5 or 1.0},0-2 hand cards above board max rank; ×0.5 normalizes
+combo,11,flush_potential,max_suit_count / 6,[0.0 - 1.0],max same-suit cards across hand(2)+board(4)=6; /6 normalizes
+combo,12,made_hand_rank,categorical mapping,[0.0 - 1.0],high card=0.0 pair=0.2 two pair=0.4 trips=0.5 straight=0.6 flush=0.7 full house=0.8 quads=0.9 straight flush=1.0
+combo,13,is_blocked,binary,{0.0 or 1.0},hand card overlaps board card
+combo,14,straight_draw_outs,outs / 8 clamped,[0.0 - 1.0],raw outs (0-20) divided by 8 then min(x 1.0); 8 = typical max (open-ender)
+combo,15,has_made_straight,binary,{0.0 or 1.0},5+ card straight present in hand+board
+combo,16,has_flush_draw,binary,{0.0 or 1.0},4 cards of same suit where hand contributes
+combo,17,is_nut_flush_draw,binary,{0.0 or 1.0},hand holds highest non-board card of flush-draw suit
+combo,18,has_made_flush,binary,{0.0 or 1.0},5+ cards of same suit where hand contributes
+global,0,board_rank1,rank / 12 (sorted desc),[0.0 - 1.0],highest board card rank normalized
+global,1,board_rank2,rank / 12 (sorted desc),[0.0 - 1.0],2nd highest board card rank normalized
+global,2,board_rank3,rank / 12 (sorted desc),[0.0 - 1.0],3rd highest board card rank normalized
+global,3,board_rank4,rank / 12 (sorted desc),[0.0 - 1.0],lowest board card rank normalized (turn card included)
+global,4,board_suit1,suit / 3,[0.0 - 1.0],4 suits (c=0 d=1 h=2 s=3) linearly mapped
+global,5,board_suit2,suit / 3,[0.0 - 1.0],4 suits linearly mapped
+global,6,board_suit3,suit / 3,[0.0 - 1.0],4 suits linearly mapped
+global,7,board_suit4,suit / 3,[0.0 - 1.0],4 suits linearly mapped (turn card)
+global,8,suit_count_club,count / 4,[0.0 - 1.0],0-4 board cards can be clubs; /4 normalizes
+global,9,suit_count_diamond,count / 4,[0.0 - 1.0],0-4 board cards can be diamonds; /4 normalizes
+global,10,suit_count_heart,count / 4,[0.0 - 1.0],0-4 board cards can be hearts; /4 normalizes
+global,11,suit_count_spade,count / 4,[0.0 - 1.0],0-4 board cards can be spades; /4 normalizes
+global,12,board_paired,binary,{0.0 or 1.0},any rank appears 2+ times on board
+global,13,board_trips,binary,{0.0 or 1.0},any rank appears 3+ times on board
+global,14,monotone,binary,{0.0 or 1.0},3+ board cards share same suit
+global,15,high_card,max_rank / 12,[0.0 - 1.0],same as board_rank1; highest board rank normalized
+global,16,connectivity,1 - span/12,[0.0 - 1.0],1.0 = all same rank (no spread); 0.0 = max spread (A to 2)
+global,17,log_spr,ln(1+SPR) / ln(22),[0.0 - 1.0],log transform spreads common SPR range (0.5-5.0) while compressing outliers; ln(22) chosen because max observed SPR ≈ 21 in 4-100bb data
+global,18,pot_fraction,pot / (pot+stack),[0.0 - 1.0],scale-invariant pot ratio; same SPR always produces same value regardless of absolute pot/stack
+global,19,stack_fraction,stack / (pot+stack),[0.0 - 1.0],scale-invariant stack ratio; complements pot_fraction (sum = 1.0); encodes how much play remains relative to pot

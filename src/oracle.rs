@@ -280,9 +280,6 @@ pub fn extract_features(
     let tree_config = game.tree_config();
     let pot = tree_config.starting_pot as f32;
     let stack = tree_config.effective_stack as f32;
-    let pot_norm = pot / 200.0;
-    let stack_norm = stack / 200.0;
-    let spr = if pot > 0.0 { stack / pot } else { 0.0 };
 
     for (b, &turn_card) in turn_cards.iter().enumerate() {
         let board = [flop[0], flop[1], flop[2], turn_card];
@@ -290,9 +287,8 @@ pub fn extract_features(
         fill_global_features(
             global_feat.row_mut(b).as_slice_mut().unwrap(),
             &board,
-            pot_norm,
-            stack_norm,
-            spr,
+            pot,
+            stack,
         );
 
         for combo_idx in 0..NUM_COMBOS {
@@ -559,7 +555,7 @@ fn fill_combo_features(
             }
             max_flush = max_flush.max(count);
         }
-        max_flush as f32 / 5.0
+        max_flush as f32 / 6.0
     };
 
     // New features
@@ -600,7 +596,7 @@ fn fill_combo_features(
     out[6] = rank_gap;
     out[7] = suit_match_c1;
     out[8] = suit_match_c2;
-    out[9] = pairs_with_board;
+    out[9] = pairs_with_board / 4.0;
     out[10] = overcards;
     out[11] = flush_potential;
     out[12] = made_hand_rank;
@@ -613,7 +609,7 @@ fn fill_combo_features(
 }
 
 /// Fill the 20 global features for one board configuration.
-fn fill_global_features(out: &mut [f32], board: &[Card; 4], pot: f32, stack: f32, spr: f32) {
+fn fill_global_features(out: &mut [f32], board: &[Card; 4], pot: f32, stack: f32) {
     let mut ranks: Vec<f32> = board.iter().map(|&c| (c >> 2) as f32 / 12.0).collect();
     ranks.sort_by(|a, b| b.partial_cmp(a).unwrap());
 
@@ -662,9 +658,11 @@ fn fill_global_features(out: &mut [f32], board: &[Card; 4], pot: f32, stack: f32
     out[14] = if monotone { 1.0 } else { 0.0 };
     out[15] = high_card;
     out[16] = connectivity;
-    out[17] = pot;
-    out[18] = stack;
-    out[19] = spr;
+    let spr = if pot > 0.0 { stack / pot } else { 0.0 };
+    let total = pot + stack;
+    out[17] = ((1.0 + spr).ln() / 22.0_f32.ln()).min(1.0);
+    out[18] = if total > 0.0 { pot / total } else { 0.0 };
+    out[19] = if total > 0.0 { stack / total } else { 0.0 };
 }
 
 /// Pad a 3D array along the first axis to `target` rows (zero-filled).
