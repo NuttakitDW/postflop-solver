@@ -657,7 +657,7 @@ fn compute_mes_ev_deepstack(
 }
 
 /// The recursive helper function for computing the counterfactual values of the given strategy.
-pub(crate) fn compute_cfvalue_recursive<T: Game>(
+pub fn compute_cfvalue_recursive<T: Game>(
     result: &mut [MaybeUninit<f32>],
     game: &T,
     node: &mut T::Node,
