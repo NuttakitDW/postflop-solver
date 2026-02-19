@@ -507,7 +507,8 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 
 #[cfg(feature = "onnx")]
 fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -> SolverResult {
-    use postflop_solver::oracle::{Device, OnnxOracle};
+    use postflop_solver::net::TurnValueNet;
+    use postflop_solver::net::Device;
 
     let total_start = Instant::now();
 
@@ -516,13 +517,13 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
         Err(e) => return create_error_result(e),
     };
 
-    println!("Loading ONNX oracle: {} (device={})", model_path, device);
-    let oracle = match OnnxOracle::new(model_path, device) {
-        Ok(o) => {
-            println!("Oracle loaded (device={}, pool={})", o.device(), o.pool_size());
-            o
+    println!("Loading ONNX model: {} (device={})", model_path, device);
+    let net = match TurnValueNet::new(model_path, device) {
+        Ok(n) => {
+            println!("Model loaded (device={}, pool={})", n.device(), n.pool_size());
+            n
         }
-        Err(e) => return create_error_result(format!("Failed to load oracle: {}", e)),
+        Err(e) => return create_error_result(format!("Failed to load model: {}", e)),
     };
 
     // Parse ranges
@@ -542,7 +543,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
         Err(e) => return create_error_result(format!("Failed to parse flop: {}", e)),
     };
 
-    // Deepstack always starts from flop (turn/river handled by oracle)
+    // Deepstack always starts from flop (turn/river handled by value network)
     let card_config = CardConfig {
         range: [oop, ip],
         flop,
@@ -693,14 +694,14 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
     let target_exploitability =
         game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
 
-    // Solve with oracle
+    // Solve with bucketed value network
     let solve_start = Instant::now();
-    let exploitability = solve_deepstack(
+    let exploitability = solve_bucketed(
         &mut game,
         config.solver.max_iterations,
         target_exploitability,
         true,
-        &oracle,
+        &net,
     );
     let solve_time = solve_start.elapsed();
 
@@ -709,7 +710,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
     // Generate memo
     let memo = config.output.memo.clone().unwrap_or_else(|| {
         format!(
-            "DEEPSTACK {} pot={}, stack={}, oracle={}",
+            "DEEPSTACK {} pot={}, stack={}, model={}",
             config.board.flop,
             config.tree.starting_pot,
             config.tree.effective_stack,
@@ -768,7 +769,7 @@ fn main() {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  <config.json>                Path to JSON configuration file");
-        eprintln!("  --deepstack <model.onnx>     Use ONNX oracle for turn CFV prediction");
+        eprintln!("  --deepstack <model.onnx>     Use bucketed value network for turn CFV prediction");
         eprintln!("  --device <device>            Execution device: cpu, cuda, coreml (default: cpu)");
         eprintln!("  --generate-template          Generate a template config file");
         std::process::exit(1);
@@ -821,7 +822,7 @@ fn main() {
     println!("Config: {}", config_path);
     println!("Threads: {}", rayon::current_num_threads());
     if let Some(ref model) = deepstack_model {
-        println!("Mode: DEEPSTACK (oracle: {}, device: {})", model, device);
+        println!("Mode: DEEPSTACK (model: {}, device: {})", model, device);
     } else {
         println!("Mode: Standard");
     }

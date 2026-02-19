@@ -13,9 +13,6 @@ use crate::action_tree::Action;
 use crate::card::*;
 #[cfg(feature = "onnx")]
 use crate::game::*;
-#[cfg(feature = "onnx")]
-use crate::oracle;
-
 #[cfg(feature = "logging")]
 use log::debug;
 
@@ -620,20 +617,62 @@ fn regret_matching_compressed(regret: &[i16], num_actions: usize) -> Vec<f32> {
 }
 
 // =============================================================================
-// Deepstack solver: uses ONNX oracle at turn chance nodes
+// Bucketed deepstack solver
 // =============================================================================
 
 #[cfg(feature = "onnx")]
-/// Solves a postflop game using deepstack approach: at turn chance nodes, the oracle
-/// neural network predicts CFVs instead of recursing into turn+river subtrees.
+use crate::bucketing::{
+    compute_board_features, compute_buckets, expand_cfv_from_buckets, project_range_to_buckets,
+    BucketMapping, DEFAULT_K,
+};
+#[cfg(feature = "onnx")]
+use crate::net::TurnValueNet;
+
+/// Pre-computed bucket mappings for all possible turn cards on a given flop.
+#[cfg(feature = "onnx")]
+pub struct BucketCache {
+    /// Indexed by card (0..52). `None` for flop cards.
+    mappings: Vec<Option<BucketMapping>>,
+    k: usize,
+}
+
+#[cfg(feature = "onnx")]
+impl BucketCache {
+    /// Pre-compute bucket mappings for all valid turn cards on the given flop.
+    pub fn new(flop: &[Card; 3], k: usize) -> Self {
+        let flop_mask: u64 = (1u64 << flop[0]) | (1u64 << flop[1]) | (1u64 << flop[2]);
+        let mut mappings: Vec<Option<BucketMapping>> = (0..52).map(|_| None).collect();
+
+        for turn in 0u8..52 {
+            if flop_mask & (1u64 << turn) != 0 {
+                continue;
+            }
+            let board = [flop[0], flop[1], flop[2], turn];
+            mappings[turn as usize] = Some(compute_buckets(&board, k));
+        }
+
+        Self { mappings, k }
+    }
+
+    /// Get the bucket mapping for a given turn card.
+    pub fn get(&self, turn_card: Card) -> &BucketMapping {
+        self.mappings[turn_card as usize]
+            .as_ref()
+            .expect("No bucket mapping for this turn card (likely a flop card)")
+    }
+}
+
+#[cfg(feature = "onnx")]
+/// Solves a postflop game using the bucketed deepstack approach: at turn chance nodes,
+/// the bucketed value network predicts CFVs instead of recursing into turn+river subtrees.
 ///
-/// Returns 0.0 (no exploitability computation in deepstack mode).
-pub fn solve_deepstack(
+/// Returns the final exploitability.
+pub fn solve_bucketed(
     game: &mut PostFlopGame,
     max_num_iterations: u32,
     target_exploitability: f32,
     print_progress: bool,
-    oracle: &oracle::OnnxOracle,
+    net: &TurnValueNet,
 ) -> f32 {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -643,15 +682,21 @@ pub fn solve_deepstack(
         panic!("Game is not ready");
     }
 
-    // Precompute combo-to-hand mappings for both players
-    let combo_to_hand = [
-        oracle::build_combo_to_hand(game, 0),
-        oracle::build_combo_to_hand(game, 1),
-    ];
+    // Pre-compute bucket mappings for all 49 turn cards
+    let flop = game.card_config().flop;
+    if print_progress {
+        print!("Pre-computing bucket mappings...");
+        io::stdout().flush().unwrap();
+    }
+    let bucket_cache = BucketCache::new(&flop, DEFAULT_K);
+    if print_progress {
+        println!(" done.");
+    }
 
     let mut root = game.root();
     let solve_timer = Instant::now();
-    let mut exploitability = compute_exploitability_deepstack(game, oracle, &combo_to_hand);
+    let mut exploitability =
+        compute_exploitability_bucketed(game, net, &bucket_cache);
     let starting_pot = game.tree_config().starting_pot as f32;
     let target_percent = if starting_pot > 0.0 {
         target_exploitability / starting_pot * 100.0
@@ -664,7 +709,7 @@ pub fn solve_deepstack(
         if starting_pot > 0.0 {
             let current_percent = exploitability / starting_pot * 100.0;
             print!(
-                "(exploitability = {current_percent:.2}% | target = {target_percent:.2}%) [{:.1}s] [deepstack]",
+                "(exploitability = {current_percent:.2}% | target = {target_percent:.2}%) [{:.1}s] [bucketed]",
                 solve_timer.elapsed().as_secs_f64()
             );
         }
@@ -680,32 +725,31 @@ pub fn solve_deepstack(
 
         for player in 0..2 {
             let mut result = Vec::with_capacity(game.num_private_hands(player));
-            solve_recursive_deepstack(
+            solve_recursive_bucketed(
                 result.spare_capacity_mut(),
                 game,
                 &mut root,
                 player,
                 game.initial_weights(player ^ 1),
                 &params,
-                oracle,
-                &combo_to_hand,
+                net,
+                &bucket_cache,
             );
         }
 
-        // Compute exploitability every 50 iterations or on the last iteration
         let check_exploitability = (t + 1) % 50 == 0 || t + 1 == max_num_iterations;
         if check_exploitability {
-            exploitability = compute_exploitability_deepstack(game, oracle, &combo_to_hand);
+            exploitability = compute_exploitability_bucketed(game, net, &bucket_cache);
         }
 
-        oracle.reset_stats();
+        net.reset_stats();
 
         if print_progress {
             print!("\riteration: {} / {} ", t + 1, max_num_iterations);
             if starting_pot > 0.0 {
                 let current_percent = exploitability / starting_pot * 100.0;
                 print!(
-                    "(exploitability = {current_percent:.2}% | target = {target_percent:.2}%) [{:.1}s] [deepstack]",
+                    "(exploitability = {current_percent:.2}% | target = {target_percent:.2}%) [{:.1}s] [bucketed]",
                     solve_timer.elapsed().as_secs_f64(),
                 );
             }
@@ -718,21 +762,21 @@ pub fn solve_deepstack(
         io::stdout().flush().unwrap();
     }
 
-    finalize_deepstack(game, oracle, &combo_to_hand);
+    finalize_bucketed(game, net, &bucket_cache);
 
     exploitability
 }
 
 #[cfg(feature = "onnx")]
-fn solve_recursive_deepstack(
+fn solve_recursive_bucketed(
     result: &mut [MaybeUninit<f32>],
     game: &PostFlopGame,
     node: &mut PostFlopNode,
     player: usize,
     cfreach: &[f32],
     params: &DiscountParams,
-    oracle: &oracle::OnnxOracle,
-    combo_to_hand: &[Vec<usize>; 2],
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
 ) {
     // Terminal node
     if node.is_terminal() {
@@ -746,17 +790,16 @@ fn solve_recursive_deepstack(
     // Single action pass-through
     if num_actions == 1 && !node.is_chance() {
         let child = &mut node.play(0);
-        solve_recursive_deepstack(result, game, child, player, cfreach, params, oracle, combo_to_hand);
+        solve_recursive_bucketed(result, game, child, player, cfreach, params, net, bucket_cache);
         return;
     }
 
-    // Turn chance node: use oracle instead of recursing into turn+river subtree
+    // Turn chance node: use bucketed net instead of recursing into turn+river subtree
     if node.is_chance() && node.turn() == NOT_DEALT {
-        oracle_predict_turn_cfv(result, game, node, player, cfreach, oracle, combo_to_hand);
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
         return;
     }
 
-    // Use MutexLike for parallel access (same pattern as standard solve_recursive)
     let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
 
     if node.is_chance() {
@@ -770,15 +813,15 @@ fn solve_recursive_deepstack(
         unsafe { cfreach_updated.set_len(cfreach.len()) };
 
         for_each_child(node, |action| {
-            solve_recursive_deepstack(
+            solve_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 &cfreach_updated,
                 params,
-                oracle,
-                combo_to_hand,
+                net,
+                bucket_cache,
             );
         });
 
@@ -805,15 +848,15 @@ fn solve_recursive_deepstack(
     } else if node.player() == player {
         // Current player's node: parallel compute + regret update
         for_each_child(node, |action| {
-            solve_recursive_deepstack(
+            solve_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 cfreach,
                 params,
-                oracle,
-                combo_to_hand,
+                net,
+                bucket_cache,
             );
         });
 
@@ -896,15 +939,15 @@ fn solve_recursive_deepstack(
         });
 
         for_each_child(node, |action| {
-            solve_recursive_deepstack(
+            solve_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 row(&cfreach_actions, action, row_size),
                 params,
-                oracle,
-                combo_to_hand,
+                net,
+                bucket_cache,
             );
         });
 
@@ -915,31 +958,36 @@ fn solve_recursive_deepstack(
 }
 
 #[cfg(feature = "onnx")]
-/// At a turn chance node, use the oracle to predict CFVs for all turn cards.
-pub(crate) fn oracle_predict_turn_cfv(
+/// At a turn chance node, use the bucketed value network to predict CFVs.
+///
+/// For each turn card:
+/// 1. Project ranges to buckets using pre-computed BucketMapping
+/// 2. Build input vector: board_features(15) + range_oop(K) + range_ip(K)
+/// 3. Run network inference
+/// 4. Expand bucket CFVs back to per-combo, then map to per-hand
+pub(crate) fn bucketed_predict_turn_cfv(
     result: &mut [MaybeUninit<f32>],
     game: &PostFlopGame,
     node: &PostFlopNode,
     player: usize,
     cfreach: &[f32],
-    oracle: &oracle::OnnxOracle,
-    _combo_to_hand: &[Vec<usize>; 2],
+    net: &TurnValueNet,
+    bucket_cache: &BucketCache,
 ) {
     let num_actions = node.num_actions();
     let num_hands = result.len();
     let opponent = player ^ 1;
 
-    // Denormalization factor: model outputs pot-normalized CFVs, multiply by pot to get chips
     let pot = game.tree_config().starting_pot as f32;
+    let stack = game.tree_config().effective_stack as f32;
+    let flop = game.card_config().flop;
 
-    // Build full 1326-element reach arrays from solver's per-hand arrays
-    let mut reach_oop_all = vec![0.0f32; 1326];
-    let mut reach_ip_all = vec![0.0f32; 1326];
+    // Build full 1326-element reach arrays
+    let mut reach_oop_all = [0.0f32; 1326];
+    let mut reach_ip_all = [0.0f32; 1326];
 
-    // Divide cfreach by chance_factor (same as normal chance handling)
     let chance_div = 1.0 / game.chance_factor(node) as f32;
 
-    // cfreach is opponent's reach; initial_weights[player] is player's reach approximation
     let player_weights = game.initial_weights(player);
     for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
         let combo_idx = card_pair_to_index(c1, c2);
@@ -967,36 +1015,51 @@ pub(crate) fn oracle_predict_turn_cfv(
         }
     }
 
-    // Extract features and run oracle
-    let feat_start = Instant::now();
-    let (combo_feat, global_feat) =
-        oracle::extract_features(game, &reach_oop_all, &reach_ip_all, &turn_cards);
-    oracle.record_feature_time(feat_start.elapsed().as_micros() as u64);
-
-    let oracle_output = oracle
-        .predict(&combo_feat, &global_feat)
-        .expect("Oracle prediction failed");
-
-    // Map oracle output to per-action CFVs, then sum across turn cards
-    // oracle_output layout: [batch * 1326 * 2], where dim 2 = [cfv_oop, cfv_ip]
+    // For each turn card: bucket → infer → expand
     let player_cfv_idx = player; // 0 for OOP, 1 for IP
     let mut result_f64 = vec![0.0f64; num_hands];
-
-    // Allocate space for per-action CFVs (needed for isomorphism)
     let mut cfv_actions = vec![0.0f32; num_actions * num_hands];
+    let k = bucket_cache.k;
 
-    for (action, &_turn_card) in turn_cards.iter().enumerate() {
-        let batch_offset = action * 1326 * 2;
+    for (action, &turn_card) in turn_cards.iter().enumerate() {
+        let board = [flop[0], flop[1], flop[2], turn_card];
+        let mapping = bucket_cache.get(turn_card);
 
+        // Project reaches to buckets
+        let bucket_range_oop = project_range_to_buckets(&reach_oop_all, mapping);
+        let bucket_range_ip = project_range_to_buckets(&reach_ip_all, mapping);
+
+        // Build input: board_features(15) + range_oop(K) + range_ip(K)
+        let board_features = compute_board_features(&board, pot, stack);
+        let mut input = Vec::with_capacity(15 + 2 * k);
+        input.extend_from_slice(&board_features);
+        input.extend_from_slice(&bucket_range_oop);
+        input.extend_from_slice(&bucket_range_ip);
+
+        // Inference
+        let output = net.predict(&input).expect("Net prediction failed");
+
+        // Split output into OOP and IP bucket CFVs
+        let cfv_oop_buckets = &output[..k];
+        let cfv_ip_buckets = &output[k..2 * k];
+
+        // Expand bucket CFVs to per-combo (1326)
+        let cfv_all = if player_cfv_idx == 0 {
+            expand_cfv_from_buckets(cfv_oop_buckets, mapping)
+        } else {
+            expand_cfv_from_buckets(cfv_ip_buckets, mapping)
+        };
+
+        // Map per-combo CFVs to per-hand (solver's hand indexing)
         for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
             let combo_idx = card_pair_to_index(c1, c2);
-            let cfv = oracle_output[batch_offset + combo_idx * 2 + player_cfv_idx] * pot;
+            let cfv = cfv_all[combo_idx] * pot; // denormalize
             cfv_actions[action * num_hands + hand_idx] = cfv;
             result_f64[hand_idx] += cfv as f64;
         }
     }
 
-    // Handle isomorphic chances (same as normal solver)
+    // Handle isomorphic chances
     let isomorphic_chances = game.isomorphic_chances(node);
     for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
         let swap_list = &game.isomorphic_swap(node, i)[player];
@@ -1018,7 +1081,7 @@ pub(crate) fn oracle_predict_turn_cfv(
 }
 
 // =============================================================================
-// Tests: Mock CFV injection to prove oracle integration correctness
+// Tests: Mock CFV injection to prove deepstack integration correctness
 // =============================================================================
 
 #[cfg(test)]
@@ -1481,7 +1544,7 @@ mod tests {
 
     /// Proves that injecting exact turn-chance-node CFVs from standard DCFR
     /// into the mock (deepstack-style) solver produces bit-exact identical
-    /// flop regrets. This validates the oracle integration approach.
+    /// flop regrets. This validates the deepstack integration approach.
     #[test]
     fn test_mock_cfv_identical_flop_regrets() {
         let card_config = CardConfig {

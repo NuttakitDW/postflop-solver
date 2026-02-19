@@ -1,10 +1,9 @@
 /target
 Cargo.lock
 
-# Output files (large solver output)
-*.flop
-
 # Keep config/*.json tracked
-preflop-ranges
 CLAUDE.md
-training_data
+
+data
+todo
+__pycache__

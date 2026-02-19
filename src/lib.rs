@@ -60,11 +60,12 @@ mod alloc;
 mod file;
 
 #[cfg(feature = "onnx")]
-pub mod oracle;
+pub mod net;
 
 mod action_tree;
 mod atomic_float;
 mod bet_size;
+pub mod bucketing;
 mod bunching;
 mod card;
 mod game;
@@ -81,6 +82,7 @@ mod utility;
 pub use file::*;
 
 pub use action_tree::*;
+pub use bucketing::*;
 pub use bet_size::*;
 pub use bunching::*;
 pub use card::*;
