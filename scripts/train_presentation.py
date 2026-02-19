@@ -37,7 +37,7 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "presentati
 # Hyperparameters
 # ---------------------------------------------------------------------------
 EPOCHS = 1000
-BATCH_SIZE = 32
+BATCH_SIZE = 897
 LR = 3e-3
 WEIGHT_DECAY = 1e-6
 HIDDEN_DIM = 500
