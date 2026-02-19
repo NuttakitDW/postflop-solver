@@ -7,7 +7,7 @@ zero-sum correction, and exports to ONNX.
 
 Usage:
     python train.py \
-        --input-dir ./training_data \
+        --input-dir ./data/training_data \
         --output turn_model.onnx \
         --epochs 300 \
         --batch-size 512 \
