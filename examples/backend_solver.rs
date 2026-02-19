@@ -506,7 +506,14 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 }
 
 #[cfg(feature = "onnx")]
-fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -> SolverResult {
+fn run_solver_deepstack(
+    config: &SolverConfig,
+    model_path: &str,
+    device: &str,
+    locked_flop: bool,
+    flop_iters: u32,
+    turnriver_iters: u32,
+) -> SolverResult {
     use postflop_solver::net::TurnValueNet;
     use postflop_solver::net::Device;
 
@@ -694,28 +701,43 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
     let target_exploitability =
         game.tree_config().starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
 
-    // Solve with bucketed value network
+    // Solve
     let solve_start = Instant::now();
-    let exploitability = solve_bucketed(
-        &mut game,
-        config.solver.max_iterations,
-        target_exploitability,
-        true,
-        &net,
-    );
+
+    let (exploitability_percent, true_exploitability) = if locked_flop {
+        // Two-phase: deepstack flop + standard turn/river with locked flop strategy
+        println!("Mode: LOCKED-FLOP (flop_iters={}, turnriver_iters={})", flop_iters, turnriver_iters);
+        let exploit = solve_with_locked_flop(
+            &mut game,
+            flop_iters,
+            turnriver_iters,
+            target_exploitability,
+            true,
+            &net,
+        );
+        let pct = exploit / game.tree_config().starting_pot as f32 * 100.0;
+        eprintln!("Locked-flop exploitability: {:.4}%", pct);
+        (pct, exploit)
+    } else {
+        // Original bucketed-only mode
+        let bucketed_exploit = solve_bucketed(
+            &mut game,
+            config.solver.max_iterations,
+            target_exploitability,
+            true,
+            &net,
+        );
+        let true_exploit = compute_exploitability(&game);
+        let pct = true_exploit / game.tree_config().starting_pot as f32 * 100.0;
+        let net_pct = bucketed_exploit / game.tree_config().starting_pot as f32 * 100.0;
+        eprintln!(
+            "Network-based exploitability: {:.4}% | True exploitability: {:.4}%",
+            net_pct, pct
+        );
+        (pct, true_exploit)
+    };
+
     let solve_time = solve_start.elapsed();
-
-    // Compute true exploitability using standard (non-network) best response.
-    // The bucketed solver only stores flop strategies; turn/river nodes have uniform strategies.
-    // Standard compute_exploitability recurses through the full game tree for exact evaluation.
-    let true_exploitability = compute_exploitability(&game);
-    let exploitability_percent = true_exploitability / game.tree_config().starting_pot as f32 * 100.0;
-    let network_exploitability_percent = exploitability / game.tree_config().starting_pot as f32 * 100.0;
-
-    eprintln!(
-        "Network-based exploitability: {:.4}% | True exploitability: {:.4}%",
-        network_exploitability_percent, exploitability_percent
-    );
 
     // Generate memo
     let memo = config.output.memo.clone().unwrap_or_else(|| {
@@ -761,7 +783,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
 }
 
 #[cfg(not(feature = "onnx"))]
-fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str, _device: &str) -> SolverResult {
+fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str, _device: &str, _locked_flop: bool, _flop_iters: u32, _turnriver_iters: u32) -> SolverResult {
     create_error_result("Deepstack mode requires the 'onnx' feature. Rebuild with --features onnx".to_string())
 }
 
@@ -774,12 +796,15 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        eprintln!("Usage: {} <config.json> [--deepstack <model.onnx>] [--device cpu|cuda|coreml]", args[0]);
+        eprintln!("Usage: {} <config.json> [--deepstack <model.onnx>] [--locked-flop] [--device cpu|cuda|coreml]", args[0]);
         eprintln!("       {} --generate-template", args[0]);
         eprintln!();
         eprintln!("Options:");
         eprintln!("  <config.json>                Path to JSON configuration file");
         eprintln!("  --deepstack <model.onnx>     Use bucketed value network for turn CFV prediction");
+        eprintln!("  --locked-flop                Two-phase: solve flop with network, then turn/river with standard DCFR");
+        eprintln!("  --flop-iters <N>             Flop iterations for locked-flop mode (default: 300)");
+        eprintln!("  --turnriver-iters <N>        Turn/river iterations for locked-flop mode (default: 300)");
         eprintln!("  --device <device>            Execution device: cpu, cuda, coreml (default: cpu)");
         eprintln!("  --generate-template          Generate a template config file");
         std::process::exit(1);
@@ -800,6 +825,9 @@ fn main() {
     // Parse CLI flags
     let mut deepstack_model = None;
     let mut device = "cpu".to_string();
+    let mut locked_flop = false;
+    let mut flop_iters: u32 = 300;
+    let mut turnriver_iters: u32 = 300;
     {
         let mut i = 2;
         while i < args.len() {
@@ -810,6 +838,18 @@ fn main() {
                 }
                 "--device" if i + 1 < args.len() => {
                     device = args[i + 1].clone();
+                    i += 2;
+                }
+                "--locked-flop" => {
+                    locked_flop = true;
+                    i += 1;
+                }
+                "--flop-iters" if i + 1 < args.len() => {
+                    flop_iters = args[i + 1].parse().expect("Invalid --flop-iters value");
+                    i += 2;
+                }
+                "--turnriver-iters" if i + 1 < args.len() => {
+                    turnriver_iters = args[i + 1].parse().expect("Invalid --turnriver-iters value");
                     i += 2;
                 }
                 _ => i += 1,
@@ -832,7 +872,12 @@ fn main() {
     println!("Config: {}", config_path);
     println!("Threads: {}", rayon::current_num_threads());
     if let Some(ref model) = deepstack_model {
-        println!("Mode: DEEPSTACK (model: {}, device: {})", model, device);
+        if locked_flop {
+            println!("Mode: LOCKED-FLOP DEEPSTACK (model: {}, device: {})", model, device);
+            println!("Flop iterations: {}, Turn/River iterations: {}", flop_iters, turnriver_iters);
+        } else {
+            println!("Mode: DEEPSTACK (model: {}, device: {})", model, device);
+        }
     } else {
         println!("Mode: Standard");
     }
@@ -850,7 +895,7 @@ fn main() {
     println!();
 
     let result = if let Some(ref model_path) = deepstack_model {
-        run_solver_deepstack(&config, model_path, &device)
+        run_solver_deepstack(&config, model_path, &device, locked_flop, flop_iters, turnriver_iters)
     } else {
         run_solver(&config)
     };

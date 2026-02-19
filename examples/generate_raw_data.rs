@@ -414,7 +414,9 @@ fn main() {
 
             let bb = 100;
             let pot = rng.gen_range(5i32..=60) * bb;
-            let stack = rng.gen_range(10i32..=100) * bb;
+            let max_stack = (pot as f32 * 5.0) as i32 / bb; // Cap SPR at 5
+            let max_stack = max_stack.clamp(10, 100);
+            let stack = rng.gen_range(10i32..=max_stack) * bb;
 
             let result = process_sample(
                 i,

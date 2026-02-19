@@ -174,6 +174,99 @@ def load_data(input_dir):
 
 
 # ---------------------------------------------------------------------------
+# Train/val split by unique board
+# ---------------------------------------------------------------------------
+
+BOARD_GEOM_FEATURES = 12  # indices 0-11 are board geometry (card-only)
+
+
+def board_grouped_split(inputs, val_fraction=0.1, seed=42):
+    """Split samples by unique board geometry to prevent data leakage.
+
+    All samples sharing the same board (flop+turn) go entirely into
+    the training set OR entirely into the validation set.
+
+    Features 0-11 encode board geometry (ranks, suits, structure).
+    Features 12-14 encode pot/stack and are ignored for grouping.
+
+    Returns (train_indices, val_indices) as numpy arrays.
+    """
+    n = inputs.shape[0]
+
+    # Round board features to avoid float comparison issues
+    # (values come from integer divisions, so 4 decimals is plenty)
+    board_keys = np.round(inputs[:, :BOARD_GEOM_FEATURES], decimals=4)
+
+    # Map each sample to a board ID
+    board_to_id = {}
+    sample_board_ids = np.empty(n, dtype=np.int64)
+    for i in range(n):
+        key = tuple(board_keys[i])
+        if key not in board_to_id:
+            board_to_id[key] = len(board_to_id)
+        sample_board_ids[i] = board_to_id[key]
+
+    n_boards = len(board_to_id)
+
+    # Count samples per board
+    board_counts = np.bincount(sample_board_ids, minlength=n_boards)
+
+    # Need at least 2 unique boards for a meaningful split
+    if n_boards < 2:
+        print(
+            f"WARNING: Only {n_boards} unique board(s). "
+            "Falling back to random sample split (board grouping impossible)."
+        )
+        perm = np.random.RandomState(seed).permutation(n)
+        val_size = max(1, int(n * val_fraction))
+        val_idx = perm[:val_size]
+        train_idx = perm[val_size:]
+        print(
+            f"Board-grouped split: {n_boards} unique boards | "
+            f"train={len(train_idx)} samples | "
+            f"val={len(val_idx)} samples (RANDOM FALLBACK)"
+        )
+        return train_idx, val_idx
+
+    # Shuffle boards and split
+    rng = np.random.RandomState(seed)
+    board_perm = rng.permutation(n_boards)
+
+    # Walk through shuffled boards, assigning to val until we reach target size.
+    # Always reserve at least 1 board for training.
+    val_board_set = set()
+    val_sample_count = 0
+    target_val = max(1, int(n * val_fraction))
+
+    for bid in board_perm:
+        if val_sample_count >= target_val:
+            break
+        # Don't assign the last board to val — keep at least 1 for training
+        if len(val_board_set) >= n_boards - 1:
+            break
+        val_board_set.add(bid)
+        val_sample_count += board_counts[bid]
+
+    # Build index arrays
+    val_mask = np.isin(sample_board_ids, list(val_board_set))
+    val_idx = np.where(val_mask)[0]
+    train_idx = np.where(~val_mask)[0]
+
+    # Verify no board leakage
+    train_boards = set(sample_board_ids[train_idx])
+    val_boards = set(sample_board_ids[val_idx])
+    assert train_boards.isdisjoint(val_boards), "Board leakage detected!"
+
+    print(
+        f"Board-grouped split: {n_boards} unique boards | "
+        f"train={len(train_idx)} samples ({len(train_boards)} boards) | "
+        f"val={len(val_idx)} samples ({len(val_boards)} boards)"
+    )
+
+    return train_idx, val_idx
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 
@@ -185,10 +278,13 @@ def train(args):
     inputs, targets = load_data(args.input_dir)
     n = inputs.shape[0]
 
-    # Train/val split (90/10)
-    val_size = max(1, int(n * 0.1))
-    perm = np.random.RandomState(42).permutation(n)
-    train_idx, val_idx = perm[val_size:], perm[:val_size]
+    # Train/val split by UNIQUE BOARD (prevents board leakage)
+    #
+    # Board-geometry features are indices 0-11 (ranks, suits, structural).
+    # Features 12-14 are pot/stack and vary across samples for the same board.
+    # Two samples sharing the same board geometry must go into the same split,
+    # otherwise the model memorizes board patterns instead of learning poker.
+    train_idx, val_idx = board_grouped_split(inputs, val_fraction=0.1, seed=42)
 
     train_inputs = torch.tensor(inputs[train_idx], dtype=torch.float32)
     train_targets = torch.tensor(targets[train_idx], dtype=torch.float32)

@@ -11,7 +11,7 @@
   # CoreML (macOS)
   cargo run --example backend_solver --release \
     --features "bincode rayon zstd jemalloc onnx-coreml" \
-    -- config/template.json --deepstack models/model_placeholder.onnx --device coreml
+    -- config/template.json --deepstack models/experiment/model_1000.onnx --device coreml
 
 # Standard DCFR
 make start CONFIG=config/template.json
@@ -23,8 +23,9 @@ Step 1 — Generate raw solver data (expensive, ~4 min for 100 samples):
 Randomly samples board/ranges/pot/stack, runs full DCFR solver on each turn-start game,
 and saves raw 1326-combo reaches + CFVs as NPY files to data/solver_output/.
 
-cargo run --release --example generate_raw_data --features "rayon" -- \
-      --num-samples 100 --target-exploit 0.5 --seed 42
+cargo run --release --example generate_raw_data --features "rayon" -- \                                                 
+      --output-dir ./data/solver_output_100k \                                                                        
+      --num-samples 100000 --target-exploit 0.5 --seed 3321
 
 Step 2 — Project to training format (cheap, <1s):
 Reads raw data from step 1, clusters 1326 combos into K=1000 buckets per board,
