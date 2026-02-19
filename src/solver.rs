@@ -986,23 +986,24 @@ pub(crate) fn bucketed_predict_turn_cfv(
     let mut reach_oop_all = [0.0f32; 1326];
     let mut reach_ip_all = [0.0f32; 1326];
 
-    let chance_div = 1.0 / game.chance_factor(node) as f32;
-
+    // Use full-scale reaches (no chance_div scaling).
+    // Training data stores reaches at full scale, so inference must match.
+    // The averaging across turn cards is handled by dividing by total_turn_cards below.
     let player_weights = game.initial_weights(player);
     for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
         let combo_idx = card_pair_to_index(c1, c2);
         if player == 0 {
-            reach_oop_all[combo_idx] = player_weights[hand_idx] * chance_div;
+            reach_oop_all[combo_idx] = player_weights[hand_idx];
         } else {
-            reach_ip_all[combo_idx] = player_weights[hand_idx] * chance_div;
+            reach_ip_all[combo_idx] = player_weights[hand_idx];
         }
     }
     for (hand_idx, &(c1, c2)) in game.private_cards(opponent).iter().enumerate() {
         let combo_idx = card_pair_to_index(c1, c2);
         if opponent == 0 {
-            reach_oop_all[combo_idx] = cfreach[hand_idx] * chance_div;
+            reach_oop_all[combo_idx] = cfreach[hand_idx];
         } else {
-            reach_ip_all[combo_idx] = cfreach[hand_idx] * chance_div;
+            reach_ip_all[combo_idx] = cfreach[hand_idx];
         }
     }
 
@@ -1074,9 +1075,17 @@ pub(crate) fn bucketed_predict_turn_cfv(
         apply_swap(tmp, swap_list);
     }
 
+    // Normalize: divide by total number of turn cards (actions + isomorphic)
+    // to get the correct chance-weighted average CFV.
+    //
+    // The standard solver divides cfreach by chance_factor before recursing into
+    // each child, making each child's CFV proportional to 1/N. Summing gives the
+    // correct average. Here we sum full-scale per-turn CFVs, so we must divide.
+    let total_turn_cards = (num_actions + isomorphic_chances.len()) as f64;
+
     // Write final result
     result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
-        r.write(v as f32);
+        r.write((v / total_turn_cards) as f32);
     });
 }
 

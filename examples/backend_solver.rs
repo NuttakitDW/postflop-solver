@@ -705,7 +705,17 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
     );
     let solve_time = solve_start.elapsed();
 
-    let exploitability_percent = exploitability / game.tree_config().starting_pot as f32 * 100.0;
+    // Compute true exploitability using standard (non-network) best response.
+    // The bucketed solver only stores flop strategies; turn/river nodes have uniform strategies.
+    // Standard compute_exploitability recurses through the full game tree for exact evaluation.
+    let true_exploitability = compute_exploitability(&game);
+    let exploitability_percent = true_exploitability / game.tree_config().starting_pot as f32 * 100.0;
+    let network_exploitability_percent = exploitability / game.tree_config().starting_pot as f32 * 100.0;
+
+    eprintln!(
+        "Network-based exploitability: {:.4}% | True exploitability: {:.4}%",
+        network_exploitability_percent, exploitability_percent
+    );
 
     // Generate memo
     let memo = config.output.memo.clone().unwrap_or_else(|| {
@@ -725,7 +735,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
             output_file: String::new(),
             solve_time_seconds: solve_time.as_secs_f64(),
             total_time_seconds: total_start.elapsed().as_secs_f64(),
-            final_exploitability: exploitability,
+            final_exploitability: true_exploitability,
             exploitability_percent,
             memory_mb,
             iterations_used: config.solver.max_iterations,
@@ -740,7 +750,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
         output_file: config.output.filename.clone(),
         solve_time_seconds: solve_time.as_secs_f64(),
         total_time_seconds: total_start.elapsed().as_secs_f64(),
-        final_exploitability: exploitability,
+        final_exploitability: true_exploitability,
         exploitability_percent,
         memory_mb,
         iterations_used: config.solver.max_iterations,
