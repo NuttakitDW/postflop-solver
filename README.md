@@ -1,3 +1,14 @@
+ # Model Spec
+ Input [2015]:
+  - [0-11] Board texture (12 features) — ranks, suits, paired, monotone, connectivity
+  - [12-14] Stack geometry (3 features) — log SPR, pot fraction, stack fraction
+  - [15-1014] OOP bucketed range (1000 buckets, sums to 1)
+  - [1015-2014] IP bucketed range (1000 buckets, sums to 1)
+
+  Output [2000]:
+  - [0-999] OOP pot-normalized CFVs per bucket
+  - [1000-1999] IP pot-normalized CFVs per bucket
+ 
  # CPU only
   cargo run --example backend_solver --release \
     --features "bincode rayon zstd jemalloc onnx" \
