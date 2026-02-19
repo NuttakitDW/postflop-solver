@@ -27,5 +27,10 @@ CoreML-GPU        2.5ms     70.2ms    121.4ms         27.8x         48.1x
 
 
 # Generate training data
-cargo run --example generate_bucketed_data --release --features "rayon" -- \
-    --output-dir ./bucketed_training_data --num-samples 1 --target-exploit 0.5 --seed 42
+1. Generate (expensive, do once):
+cargo run --example generate_raw_data --release --features "rayon" -- \         
+    --output-dir ./raw_training_data --num-samples 100000 --seed 42
+
+2. Project (cheap, re-run anytime you change K, features, or weights)
+cargo run --example project_data --release --features "rayon" -- \
+    --input-dir ./raw_training_data --output-dir ./bucketed_training_data --k 1000

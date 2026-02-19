@@ -10,4 +10,5 @@ CLAUDE.md
 training_data
 
 todo
-bucketed_training_data
+projected_training_data
+raw_training_data
