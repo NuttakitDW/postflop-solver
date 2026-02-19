@@ -93,7 +93,7 @@ fn write_npy_raw(path: &str, header: &str, data: &[f32]) -> std::io::Result<()> 
 }
 
 // ---------------------------------------------------------------------------
-// Bet / donk sizes (identical to generate_bucketed_data.rs)
+// Bet / donk sizes
 // ---------------------------------------------------------------------------
 
 fn build_bet_sizes() -> ([BetSizeOptions; 2], [BetSizeOptions; 2]) {
