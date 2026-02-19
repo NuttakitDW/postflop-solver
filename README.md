@@ -27,10 +27,17 @@ CoreML-GPU        2.5ms     70.2ms    121.4ms         27.8x         48.1x
 
 
 # Generate training data
-Step 1 — Generate raw solver data (expensive, ~4 min for 100 samples):                                                  
-                                                          cargo run --release --example generate_raw_data --features "rayon" -- \
+
+Step 1 — Generate raw solver data (expensive, ~4 min for 100 samples):
+Randomly samples board/ranges/pot/stack, runs full DCFR solver on each turn-start game,
+and saves raw 1326-combo reaches + CFVs as NPY files to data/solver_output/.
+
+cargo run --release --example generate_raw_data --features "rayon" -- \
       --num-samples 100 --target-exploit 0.5 --seed 42
 
 Step 2 — Project to training format (cheap, <1s):
+Reads raw data from step 1, clusters 1326 combos into K=1000 buckets per board,
+and projects reaches/CFVs into bucket space. Outputs model-ready inputs.npy [N,2015]
+and targets.npy [N,2000] to data/training_data/.
 
 cargo run --release --example project_data --features "rayon"
