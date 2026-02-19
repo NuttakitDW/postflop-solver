@@ -1,17 +1,17 @@
  # CPU only
   cargo run --example backend_solver --release \
     --features "bincode rayon zstd jemalloc onnx" \
-    -- config/template.json --deepstack model_2.onnx --device cpu
+    -- config/template.json --deepstack models/model_placeholder.onnx --device cpu
 
   # CUDA (NVIDIA GPU)
   cargo run --example backend_solver --release \
     --features "bincode rayon zstd jemalloc onnx-cuda" \
-    -- config/template.json --deepstack model_2.onnx --device cuda
+    -- config/template.json --deepstack models/model_placeholder.onnx --device cuda
 
   # CoreML (macOS)
   cargo run --example backend_solver --release \
     --features "bincode rayon zstd jemalloc onnx-coreml" \
-    -- config/template.json --deepstack model_2.onnx --device coreml
+    -- config/template.json --deepstack models/model_placeholder.onnx --device coreml
 
 # Standard DCFR
 make start CONFIG=config/template.json

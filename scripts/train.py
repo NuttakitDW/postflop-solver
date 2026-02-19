@@ -318,6 +318,7 @@ def export_onnx(model, output_path, device):
             "output": {0: "batch_size"},
         },
         opset_version=17,
+        dynamo=False,  # single .onnx file (no external .onnx.data)
     )
 
     file_size = os.path.getsize(output_path) / (1024 * 1024)
