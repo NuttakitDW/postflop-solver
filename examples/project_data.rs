@@ -12,8 +12,8 @@
 //!
 //! Usage:
 //!   cargo run --example project_data --release --features "rayon" -- \
-//!     --input-dir ./raw_training_data \
-//!     --output-dir ./bucketed_training_data \
+//!     --input-dir ./solver_output \
+//!     --output-dir ./training_data \
 //!     --k 1000
 
 use ndarray::{Array1, Array2};
@@ -215,8 +215,8 @@ fn project_row(
 
 fn parse_args() -> (String, String, usize) {
     let args: Vec<String> = std::env::args().collect();
-    let mut input_dir = String::from("./raw_training_data");
-    let mut output_dir = String::from("./bucketed_training_data");
+    let mut input_dir = String::from("./solver_output");
+    let mut output_dir = String::from("./training_data");
     let mut k: usize = DEFAULT_K; // 1000
 
     let mut i = 1;
@@ -237,10 +237,10 @@ fn parse_args() -> (String, String, usize) {
             "--help" | "-h" => {
                 eprintln!("Usage: project_data [OPTIONS]");
                 eprintln!(
-                    "  --input-dir <DIR>   Raw data directory (default: ./raw_training_data)"
+                    "  --input-dir <DIR>   Raw data directory (default: ./solver_output)"
                 );
                 eprintln!(
-                    "  --output-dir <DIR>  Output directory (default: ./bucketed_training_data)"
+                    "  --output-dir <DIR>  Output directory (default: ./training_data)"
                 );
                 eprintln!("  --k <N>             Number of buckets (default: {})", DEFAULT_K);
                 std::process::exit(0);

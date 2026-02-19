@@ -10,7 +10,7 @@
 //!
 //! Usage:
 //!   cargo run --example generate_raw_data --release --features "rayon" -- \
-//!     --output-dir ./raw_training_data \
+//!     --output-dir ./solver_output \
 //!     --num-samples 10000 \
 //!     --target-exploit 0.5 \
 //!     --seed 42
@@ -327,7 +327,7 @@ fn process_sample(
 
 fn parse_args() -> (String, usize, f32, u64) {
     let args: Vec<String> = std::env::args().collect();
-    let mut output_dir = String::from("./raw_training_data");
+    let mut output_dir = String::from("./solver_output");
     let mut num_samples: usize = 10000;
     let mut target_exploit: f32 = 0.5;
     let mut seed: u64 = 42;
@@ -354,7 +354,7 @@ fn parse_args() -> (String, usize, f32, u64) {
             "--help" | "-h" => {
                 eprintln!("Usage: generate_raw_data [OPTIONS]");
                 eprintln!(
-                    "  --output-dir <DIR>       Output directory (default: ./raw_training_data)"
+                    "  --output-dir <DIR>       Output directory (default: ./solver_output)"
                 );
                 eprintln!(
                     "  --num-samples <N>        Number of samples (default: 10000)"

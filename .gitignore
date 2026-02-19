@@ -7,8 +7,7 @@ Cargo.lock
 # Keep config/*.json tracked
 preflop-ranges
 CLAUDE.md
-training_data
 
 todo
-projected_training_data
-raw_training_data
+solver_output
+training_data
