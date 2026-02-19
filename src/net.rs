@@ -6,12 +6,44 @@
 //! Input:  `[batch, 2015]` = board(15) + range_oop(1000) + range_ip(1000)
 //! Output: `[batch, 2000]` = cfv_oop(1000) + cfv_ip(1000)
 
-use crate::oracle::Device;
 use ndarray::Array2;
 use ort::session::Session;
 use ort::value::TensorRef;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+/// Device selection for ONNX inference execution provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    /// CPU-only execution (always available).
+    Cpu,
+    /// CoreML execution (macOS, requires `onnx-coreml` feature).
+    CoreML,
+    /// CUDA execution (NVIDIA GPU, requires `onnx-cuda` feature).
+    Cuda,
+}
+
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Device::Cpu => write!(f, "cpu"),
+            Device::CoreML => write!(f, "coreml"),
+            Device::Cuda => write!(f, "cuda"),
+        }
+    }
+}
+
+impl std::str::FromStr for Device {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cpu" => Ok(Device::Cpu),
+            "coreml" | "mps" => Ok(Device::CoreML),
+            "cuda" | "gpu" => Ok(Device::Cuda),
+            _ => Err(format!("Unknown device '{}'. Use: cpu, cuda, coreml", s)),
+        }
+    }
+}
 
 const INPUT_DIM: usize = 2015;
 const OUTPUT_DIM: usize = 2000;

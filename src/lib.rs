@@ -60,9 +60,6 @@ mod alloc;
 mod file;
 
 #[cfg(feature = "onnx")]
-pub mod oracle;
-
-#[cfg(feature = "onnx")]
 pub mod net;
 
 mod action_tree;

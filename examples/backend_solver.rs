@@ -508,7 +508,7 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 #[cfg(feature = "onnx")]
 fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -> SolverResult {
     use postflop_solver::net::TurnValueNet;
-    use postflop_solver::oracle::Device;
+    use postflop_solver::net::Device;
 
     let total_start = Instant::now();
 
@@ -543,7 +543,7 @@ fn run_solver_deepstack(config: &SolverConfig, model_path: &str, device: &str) -
         Err(e) => return create_error_result(format!("Failed to parse flop: {}", e)),
     };
 
-    // Deepstack always starts from flop (turn/river handled by oracle)
+    // Deepstack always starts from flop (turn/river handled by value network)
     let card_config = CardConfig {
         range: [oop, ip],
         flop,
@@ -769,7 +769,7 @@ fn main() {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  <config.json>                Path to JSON configuration file");
-        eprintln!("  --deepstack <model.onnx>     Use ONNX oracle for turn CFV prediction");
+        eprintln!("  --deepstack <model.onnx>     Use bucketed value network for turn CFV prediction");
         eprintln!("  --device <device>            Execution device: cpu, cuda, coreml (default: cpu)");
         eprintln!("  --generate-template          Generate a template config file");
         std::process::exit(1);
@@ -822,7 +822,7 @@ fn main() {
     println!("Config: {}", config_path);
     println!("Threads: {}", rayon::current_num_threads());
     if let Some(ref model) = deepstack_model {
-        println!("Mode: DEEPSTACK (oracle: {}, device: {})", model, device);
+        println!("Mode: DEEPSTACK (model: {}, device: {})", model, device);
     } else {
         println!("Mode: Standard");
     }

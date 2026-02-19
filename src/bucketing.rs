@@ -118,7 +118,7 @@ pub fn compute_equity(board: &[Card; 4]) -> [f32; 1326] {
 }
 
 // ---------------------------------------------------------------------------
-// Hand-feature helpers (duplicated from oracle.rs to avoid #[cfg(feature = "onnx")])
+// Hand-feature helpers for board/combo feature computation
 // ---------------------------------------------------------------------------
 
 fn check_straight(rank_bits: u16) -> bool {
