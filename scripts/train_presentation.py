@@ -8,11 +8,13 @@ Usage:
     python scripts/train_presentation.py
 """
 
+import argparse
 import os
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -31,13 +33,13 @@ BOARD_GEOM_FEATURES = 12             # indices 0-11 for board grouping
 # Paths
 # ---------------------------------------------------------------------------
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "training_data_100k")
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "100k_regularized")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "temp")
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
 EPOCHS = 30
-BATCH_SIZE = 512
+BATCH_SIZE = 4096
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
 HIDDEN_DIM = 500
@@ -45,7 +47,7 @@ NUM_LAYERS = 7
 DROPOUT = 0.0
 HUBER_DELTA = 1.0
 GRAD_CLIP = 5.0
-WARMUP_EPOCHS = 10
+WARMUP_EPOCHS = 3
 TEST_FRACTION = 0.2
 SEED = 42
 
@@ -152,6 +154,11 @@ def board_grouped_split(inputs, test_fraction=0.2, seed=42):
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="Train bucketed value network")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Use only first N samples from the dataset (default: use all)")
+    args = parser.parse_args()
+
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
@@ -168,7 +175,13 @@ def main():
     # Load data
     inputs = np.load(os.path.join(DATA_DIR, "inputs.npy"))
     targets = np.load(os.path.join(DATA_DIR, "targets.npy"))
-    print(f"Loaded {inputs.shape[0]} samples | input={inputs.shape[1]}, output={targets.shape[1]}")
+
+    if args.max_samples and args.max_samples < inputs.shape[0]:
+        inputs = inputs[:args.max_samples]
+        targets = targets[:args.max_samples]
+        print(f"Sliced to {args.max_samples} samples")
+
+    print(f"Using {inputs.shape[0]} samples | input={inputs.shape[1]}, output={targets.shape[1]}")
 
     # 80/20 board-grouped split
     train_idx, test_idx = board_grouped_split(inputs, test_fraction=TEST_FRACTION, seed=SEED)
@@ -230,7 +243,8 @@ def main():
         epoch_train_loss = 0.0
         train_samples = 0
 
-        for batch_x, batch_y in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1:3d}/{EPOCHS}", leave=False)
+        for batch_x, batch_y in pbar:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             bs = batch_x.size(0)
@@ -245,6 +259,7 @@ def main():
 
             epoch_train_loss += loss.item() * bs
             train_samples += bs
+            pbar.set_postfix(loss=f"{loss.item():.6f}")
 
         scheduler.step()
 
@@ -283,14 +298,12 @@ def main():
             ckpt_path = os.path.join(OUTPUT_DIR, f"checkpoint_epoch_{epoch + 1}.pt")
             torch.save(model.state_dict(), ckpt_path)
 
-        # Log every 50 epochs + first and last
         lr = scheduler.get_last_lr()[0]
-        if (epoch + 1) % 50 == 0 or epoch == 0 or epoch == EPOCHS - 1:
-            print(
-                f"Epoch {epoch + 1:4d}/{EPOCHS} | "
-                f"train={avg_train_loss:.6f}  test={avg_test_loss:.6f} | "
-                f"lr={lr:.2e}"
-            )
+        print(
+            f"Epoch {epoch + 1:4d}/{EPOCHS} | "
+            f"train={avg_train_loss:.6f}  test={avg_test_loss:.6f} | "
+            f"lr={lr:.2e}"
+        )
 
     print(f"\nBest test loss: {best_test_loss:.6f} at epoch {best_epoch}")
 

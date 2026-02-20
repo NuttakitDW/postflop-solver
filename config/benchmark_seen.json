@@ -1,0 +1,48 @@
+{
+  "board": {
+    "flop": "5dJdQc",
+    "turn": null,
+    "river": null
+  },
+  "ranges": {
+    "oop": "AA,KK,QQ,JJ,TT,99,88,77,66,55,44,33,22,AKs,AQs,AJs,ATs,A9s,A8s,A7s,A6s,A5s,A4s,A3s,A2s,KQs,KJs,KTs,K9s,QJs,QTs,JTs,T9s,98s,87s,76s,65s,54s,AKo,AQo,AJo,ATo,KQo,KJo,QJo",
+    "ip": "AA,KK,QQ,JJ,TT,99,88,77,66,55,44,33,22,AKs,AQs,AJs,ATs,A9s,A8s,A7s,A6s,A5s,A4s,A3s,A2s,KQs,KJs,KTs,K9s,QJs,QTs,JTs,T9s,98s,87s,76s,65s,54s,AKo,AQo,AJo,ATo,KQo,KJo,QJo"
+  },
+  "betSizes": {
+    "oopFlopBet": "33, a",
+    "oopFlopRaise": "33, 55, a",
+    "oopTurnBet": "20, 33, 55, 83, 125, 200, a",
+    "oopTurnRaise": "33, 55, a",
+    "oopTurnDonk": "",
+    "oopRiverBet": "11, 35, 60, 85, 149, a",
+    "oopRiverRaise": "33, 55, a",
+    "oopRiverDonk": "",
+    "ipFlopBet": "20, 33, 55, 83, 125, a",
+    "ipFlopRaise": "33, 55, a",
+    "ipTurnBet": "20, 33, 55, 83, 125, 200, a",
+    "ipTurnRaise": "33, 55, a",
+    "ipRiverBet": "11, 35, 60, 85, 149, a",
+    "ipRiverRaise": "33, 55, a"
+  },
+  "tree": {
+    "startingPot": 55,
+    "effectiveStack": 180,
+    "rakePercent": 0.0,
+    "rakeCap": 0.0,
+    "donkOption": 0,
+    "addAllInThreshold": 150.0,
+    "forceAllInThreshold": 20.0,
+    "mergingThreshold": 10.0,
+    "maxRaisesPerStreet": 0
+  },
+  "solver": {
+    "maxIterations": 1000,
+    "targetExploitabilityPercent": 0.5,
+    "useCompression": false
+  },
+  "output": {
+    "filename": "data/out/benchmark.flop",
+    "compressionLevel": 3,
+    "memo": "Benchmark on seen board 5dJdQc"
+  }
+}
