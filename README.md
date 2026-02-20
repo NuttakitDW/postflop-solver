@@ -36,9 +36,9 @@ and saves raw 1326-combo reaches + CFVs as NPY files to data/solver_output/.
 
 cargo run --release --example generate_raw_data --features "rayon" -- --output-dir ./data/solver_output_100k --num-samples 100000 --target-exploit 0.5 --seed 3321
 
-Step 2 — Project to training format (cheap, <1s):
+Step 2 — Preprocess into training format (cheap, <1s):
 Reads raw data from step 1, clusters 1326 combos into K=1000 buckets per board,
 and projects reaches/CFVs into bucket space. Outputs model-ready inputs.npy [N,2015]
 and targets.npy [N,2000] to data/training_data/.
 
-cargo run --release --example project_data --features "rayon"
+cargo run --release --example preprocess_data --features "rayon"

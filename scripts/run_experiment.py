@@ -290,7 +290,7 @@ def main():
     # Check available data
     total = get_available_sample_count()
     if total == 0:
-        print("ERROR: No training data found. Run generate_raw_data + project_data first.")
+        print("ERROR: No training data found. Run generate_raw_data + preprocess_data first.")
         sys.exit(1)
 
     print(f"Available training samples: {total}")

@@ -1,7 +1,7 @@
 //! Raw training data generator for the Turn value network.
 //!
 //! Generates "Golden Source" data: raw 1326-combo reach and CFV arrays.
-//! Use `project_data` to convert raw data into bucketed training data.
+//! Use `preprocess_data` to convert raw data into bucketed training data.
 //!
 //! Output files:
 //!   meta.npy    — [N, 6]    (board[0..3] as card indices, pot, stack)

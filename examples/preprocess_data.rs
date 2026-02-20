@@ -11,7 +11,7 @@
 //!   - Board feature definitions in compute_board_features()
 //!
 //! Usage:
-//!   cargo run --example project_data --release --features "rayon" -- \
+//!   cargo run --example preprocess_data --release --features "rayon" -- \
 //!     --input-dir ./data/solver_output \
 //!     --output-dir ./data/training_data \
 //!     --k 1000
@@ -235,7 +235,7 @@ fn parse_args() -> (String, String, usize) {
                 i += 2;
             }
             "--help" | "-h" => {
-                eprintln!("Usage: project_data [OPTIONS]");
+                eprintln!("Usage: preprocess_data [OPTIONS]");
                 eprintln!(
                     "  --input-dir <DIR>   Raw data directory (default: ./data/solver_output)"
                 );

@@ -30,20 +30,22 @@ BOARD_GEOM_FEATURES = 12             # indices 0-11 for board grouping
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "experiment", "subset_100")
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "presentation")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "training_data_100k")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "100k_presentation")
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
-EPOCHS = 1000
-BATCH_SIZE = 897
+EPOCHS = 300
+BATCH_SIZE = 2048
 LR = 3e-3
 WEIGHT_DECAY = 1e-6
 HIDDEN_DIM = 500
 NUM_LAYERS = 7
 HUBER_DELTA = 1.0
 GRAD_CLIP = 5.0
+WARMUP_EPOCHS = 50
+TEST_FRACTION = 0.2
 SEED = 42
 
 # ---------------------------------------------------------------------------
@@ -166,7 +168,7 @@ def main():
     print(f"Loaded {inputs.shape[0]} samples | input={inputs.shape[1]}, output={targets.shape[1]}")
 
     # 80/20 board-grouped split
-    train_idx, test_idx = board_grouped_split(inputs, test_fraction=0.2, seed=SEED)
+    train_idx, test_idx = board_grouped_split(inputs, test_fraction=TEST_FRACTION, seed=SEED)
 
     train_x = torch.tensor(inputs[train_idx], dtype=torch.float32)
     train_y = torch.tensor(targets[train_idx], dtype=torch.float32)
@@ -192,12 +194,11 @@ def main():
 
     # Optimizer + scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    # Warmup for 50 epochs, then cosine decay
-    warmup_epochs = 50
+    # Warmup then cosine decay
     def lr_lambda(epoch):
-        if epoch < warmup_epochs:
-            return (epoch + 1) / warmup_epochs
-        progress = (epoch - warmup_epochs) / (EPOCHS - warmup_epochs)
+        if epoch < WARMUP_EPOCHS:
+            return (epoch + 1) / WARMUP_EPOCHS
+        progress = (epoch - WARMUP_EPOCHS) / (EPOCHS - WARMUP_EPOCHS)
         return 0.01 + 0.99 * 0.5 * (1 + np.cos(np.pi * progress))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -217,7 +218,7 @@ def main():
     print(f"  Weight decay: {WEIGHT_DECAY}")
     print(f"  Huber delta:  {HUBER_DELTA}")
     print(f"  Grad clip:    {GRAD_CLIP}")
-    print(f"  Scheduler:    Warmup({warmup_epochs}) + CosineDecay")
+    print(f"  Scheduler:    Warmup({WARMUP_EPOCHS}) + CosineDecay")
     print(f"\nTraining...\n")
 
     for epoch in range(EPOCHS):
