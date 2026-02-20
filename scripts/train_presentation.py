@@ -31,20 +31,21 @@ BOARD_GEOM_FEATURES = 12             # indices 0-11 for board grouping
 # Paths
 # ---------------------------------------------------------------------------
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "training_data_100k")
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "100k_presentation")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "100k_regularized")
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
-EPOCHS = 300
+EPOCHS = 30
 BATCH_SIZE = 2048
-LR = 3e-3
-WEIGHT_DECAY = 1e-6
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
 HIDDEN_DIM = 500
 NUM_LAYERS = 7
+DROPOUT = 0.0
 HUBER_DELTA = 1.0
 GRAD_CLIP = 5.0
-WARMUP_EPOCHS = 50
+WARMUP_EPOCHS = 10
 TEST_FRACTION = 0.2
 SEED = 42
 
@@ -69,13 +70,15 @@ class ZeroSumCorrectionLayer(nn.Module):
 
 
 class TurnValueNetwork(nn.Module):
-    def __init__(self, hidden_dim=500, num_layers=7):
+    def __init__(self, hidden_dim=500, num_layers=7, dropout=0.15):
         super().__init__()
         layers = []
         in_dim = INPUT_DIM
         for _ in range(num_layers):
             layers.append(nn.Linear(in_dim, hidden_dim))
             layers.append(nn.PReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
             in_dim = hidden_dim
         layers.append(nn.Linear(hidden_dim, OUTPUT_DIM))
         self.backbone = nn.Sequential(*layers)
@@ -188,7 +191,7 @@ def main():
     )
 
     # Model
-    model = TurnValueNetwork(hidden_dim=HIDDEN_DIM, num_layers=NUM_LAYERS).to(device)
+    model = TurnValueNetwork(hidden_dim=HIDDEN_DIM, num_layers=NUM_LAYERS, dropout=DROPOUT).to(device)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {NUM_LAYERS} layers x {HIDDEN_DIM} neurons, {num_params:,} params")
 
