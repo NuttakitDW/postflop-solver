@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -36,14 +37,13 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "100k_regul
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
-EPOCHS = 30
+EPOCHS = 300
 BATCH_SIZE = 512
 LR = 1e-3
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 1e-5
 HIDDEN_DIM = 500
 NUM_LAYERS = 7
 DROPOUT = 0.0
-HUBER_DELTA = 1.0
 GRAD_CLIP = 5.0
 WARMUP_EPOCHS = 10
 TEST_FRACTION = 0.2
@@ -205,8 +205,8 @@ def main():
         return 0.01 + 0.99 * 0.5 * (1 + np.cos(np.pi * progress))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # Loss: plain Huber loss
-    criterion = nn.HuberLoss(reduction="mean", delta=HUBER_DELTA)
+    # Loss: MSE
+    criterion = nn.MSELoss(reduction="mean")
 
     # Tracking
     train_losses = []
@@ -219,7 +219,7 @@ def main():
     print(f"  Batch size:   {BATCH_SIZE}")
     print(f"  Learning rate:{LR}")
     print(f"  Weight decay: {WEIGHT_DECAY}")
-    print(f"  Huber delta:  {HUBER_DELTA}")
+    print(f"  Loss:         MSE")
     print(f"  Grad clip:    {GRAD_CLIP}")
     print(f"  Scheduler:    Warmup({WARMUP_EPOCHS}) + CosineDecay")
     print(f"\nTraining...\n")
@@ -230,7 +230,8 @@ def main():
         epoch_train_loss = 0.0
         train_samples = 0
 
-        for batch_x, batch_y in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1:3d}/{EPOCHS}", leave=False)
+        for batch_x, batch_y in pbar:
             batch_x = batch_x.to(device)
             batch_y = batch_y.to(device)
             bs = batch_x.size(0)
@@ -245,6 +246,7 @@ def main():
 
             epoch_train_loss += loss.item() * bs
             train_samples += bs
+            pbar.set_postfix(loss=f"{loss.item():.6f}")
 
         scheduler.step()
 
@@ -283,14 +285,12 @@ def main():
             ckpt_path = os.path.join(OUTPUT_DIR, f"checkpoint_epoch_{epoch + 1}.pt")
             torch.save(model.state_dict(), ckpt_path)
 
-        # Log every 50 epochs + first and last
         lr = scheduler.get_last_lr()[0]
-        if (epoch + 1) % 50 == 0 or epoch == 0 or epoch == EPOCHS - 1:
-            print(
-                f"Epoch {epoch + 1:4d}/{EPOCHS} | "
-                f"train={avg_train_loss:.6f}  test={avg_test_loss:.6f} | "
-                f"lr={lr:.2e}"
-            )
+        print(
+            f"Epoch {epoch + 1:4d}/{EPOCHS} | "
+            f"train={avg_train_loss:.6f}  test={avg_test_loss:.6f} | "
+            f"lr={lr:.2e}"
+        )
 
     print(f"\nBest test loss: {best_test_loss:.6f} at epoch {best_epoch}")
 
@@ -312,7 +312,7 @@ def main():
     ax1.plot(epochs_range, train_losses, label="Train Loss", linewidth=1.0, alpha=0.85)
     ax1.plot(epochs_range, test_losses, label="Test Loss", linewidth=1.0, alpha=0.85)
     ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Huber Loss")
+    ax1.set_ylabel("MSE Loss")
     ax1.set_title("Train vs Test Loss (Full)")
     ax1.legend()
     ax1.grid(True, alpha=0.3)
@@ -321,7 +321,7 @@ def main():
     ax2.plot(epochs_range, train_losses, label="Train Loss", linewidth=1.0, alpha=0.85)
     ax2.plot(epochs_range, test_losses, label="Test Loss", linewidth=1.0, alpha=0.85)
     ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Huber Loss (log scale)")
+    ax2.set_ylabel("MSE Loss (log scale)")
     ax2.set_title("Train vs Test Loss (Log Scale)")
     ax2.set_yscale("log")
     ax2.legend()
