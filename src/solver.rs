@@ -1,3 +1,5 @@
+use crate::card::Card;
+use crate::game::{PostFlopGame, PostFlopNode};
 use crate::interface::*;
 use crate::mutex_like::*;
 use crate::sliceop::*;
@@ -754,6 +756,205 @@ fn solve_recursive<T: Game>(
             cfr_log!("{}[d{}] OPP_RESULT ({}) cfv={}",
                       cfr_indent(), depth, opp_name, slice_stats(r));
         }
+    }
+}
+
+/// A trait for neural network models that predict counterfactual values at chance nodes.
+///
+/// The model takes board cards + reach probabilities and returns CFVs for a given player,
+/// replacing the full turn/river subtree solve.
+pub trait CfvModel: Send + Sync {
+    /// Predict counterfactual values for `player` at a chance (turn-deal) node.
+    ///
+    /// # Arguments
+    /// * `flop` - The 3 flop cards
+    /// * `player` - Which player's CFVs to compute (0=OOP, 1=IP)
+    /// * `cfreach` - Opponent's counterfactual reach probabilities, length = num_hands
+    ///
+    /// # Returns
+    /// * Vec<f32> of length num_hands — the predicted CFVs for `player`
+    fn predict_cfv(
+        &self,
+        flop: &[Card; 3],
+        player: usize,
+        cfreach: &[f32],
+    ) -> Vec<f32>;
+}
+
+/// Recursively solves counterfactual values, using a neural network at chance nodes
+/// instead of recursing into turn/river subtrees.
+///
+/// Only flop-level nodes get their regrets/strategy updated. Turn/river are skipped entirely.
+fn solve_recursive_with_nn(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    node: &mut PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    params: &DiscountParams,
+    model: &dyn CfvModel,
+) {
+    // return the counterfactual values when the `node` is terminal
+    if node.is_terminal() {
+        game.evaluate(result, node, player, cfreach);
+        return;
+    }
+
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+
+    // simply recurse when the number of actions is one
+    if num_actions == 1 && !node.is_chance() {
+        let child = &mut node.play(0);
+        solve_recursive_with_nn(result, game, child, player, cfreach, params, model);
+        return;
+    }
+
+    // allocate memory for storing the counterfactual values
+    let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+    // if the `node` is a chance node → use NN instead of recursing
+    if node.is_chance() {
+        let flop = game.card_config().flop;
+        let result_f64 = model.predict_cfv(&flop, player, cfreach);
+
+        result.iter_mut().zip(result_f64.iter()).for_each(|(r, &v)| {
+            r.write(v);
+        });
+    }
+    // if the current player is `player`
+    else if node.player() == player {
+        // compute the counterfactual values of each action
+        for action in 0..num_actions {
+            solve_recursive_with_nn(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                cfreach,
+                params,
+                model,
+            );
+        }
+
+        // compute the strategy by regret-matching algorithm
+        let mut strategy = if game.is_compression_enabled() {
+            regret_matching_compressed(node.regrets_compressed(), num_actions)
+        } else {
+            regret_matching(node.regrets(), num_actions)
+        };
+
+        // node-locking
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut strategy, locking);
+
+        // sum up the counterfactual values
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+
+        let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+        if game.is_compression_enabled() {
+            // update the cumulative strategy
+            let scale = node.strategy_scale();
+            let decoder = params.gamma_t * scale / u16::MAX as f32;
+            let cum_strategy = node.strategy_compressed_mut();
+
+            strategy.iter_mut().zip(&*cum_strategy).for_each(|(x, y)| {
+                *x += (*y as f32) * decoder;
+            });
+
+            if !locking.is_empty() {
+                strategy.iter_mut().zip(locking).for_each(|(d, s)| {
+                    if s.is_sign_positive() {
+                        *d = 0.0;
+                    }
+                })
+            }
+
+            let new_scale = encode_unsigned_slice(cum_strategy, &strategy);
+            node.set_strategy_scale(new_scale);
+
+            // update the cumulative regret
+            let scale = node.regret_scale();
+            let alpha_decoder = params.alpha_t * scale / i16::MAX as f32;
+            let beta_decoder = params.beta_t * scale / i16::MAX as f32;
+            let cum_regret = node.regrets_compressed_mut();
+
+            cfv_actions.iter_mut().zip(&*cum_regret).for_each(|(x, y)| {
+                *x += *y as f32 * if *y >= 0 { alpha_decoder } else { beta_decoder };
+            });
+
+            cfv_actions.chunks_exact_mut(num_hands).for_each(|row| {
+                sub_slice(row, result);
+            });
+
+            if !locking.is_empty() {
+                cfv_actions.iter_mut().zip(locking).for_each(|(d, s)| {
+                    if s.is_sign_positive() {
+                        *d = 0.0;
+                    }
+                })
+            }
+
+            let new_scale = encode_signed_slice(cum_regret, &cfv_actions);
+            node.set_regret_scale(new_scale);
+        } else {
+            // update the cumulative strategy
+            let gamma = params.gamma_t;
+            let cum_strategy = node.strategy_mut();
+            cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
+                *x = *x * gamma + *y;
+            });
+
+            // update the cumulative regret
+            let (alpha, beta) = (params.alpha_t, params.beta_t);
+            let cum_regret = node.regrets_mut();
+            cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y)| {
+                let coef = if x.is_sign_positive() { alpha } else { beta };
+                *x = *x * coef + *y;
+            });
+            cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
+                sub_slice(row, result);
+            });
+        }
+    }
+    // if the current player is not `player`
+    else {
+        // compute the strategy by regret-matching algorithm
+        let mut cfreach_actions = if game.is_compression_enabled() {
+            regret_matching_compressed(node.regrets_compressed(), num_actions)
+        } else {
+            regret_matching(node.regrets(), num_actions)
+        };
+
+        // node-locking
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut cfreach_actions, locking);
+
+        // update the reach probabilities
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        // compute the counterfactual values of each action
+        for action in 0..num_actions {
+            solve_recursive_with_nn(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                row(&cfreach_actions, action, row_size),
+                params,
+                model,
+            );
+        }
+
+        // sum up the counterfactual values
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_uninit(result, &cfv_actions);
     }
 }
 
