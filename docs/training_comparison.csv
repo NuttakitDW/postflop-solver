@@ -1,0 +1,18 @@
+Component,Old (train_presentation.py),Fixed (train_huber.py),Status,Impact
+Architecture,Linear → PReLU,Linear → LayerNorm → GELU,Changed,Critical — LayerNorm stabilizes gradients through 7 layers
+Optimizer,Adam(lr=1e-3),Ranger21(lr=3e-3),Changed,Critical — lookahead + gradient centralization escape flat basins
+LR Schedule,LambdaLR per-epoch warmup+cosine,OneCycleLR per-batch stepping,Changed,Major — LR changes every batch not every epoch
+Learning Rate,1e-3,3e-3,Changed,Higher peak LR
+Input Scaling,None,Board features standardized (zero-mean unit-var),Changed,Major — without this board features dominate gradient signal
+Target Scaling,None,y / max(abs(y)),Changed,Major — normalizes loss landscape
+EMA,None,decay=0.999 val uses EMA weights,Changed,Smoother validation better checkpoint
+Early Stopping,None (fixed 30 epochs),50-epoch patience up to 500,Changed,Major — trains long enough to converge
+Batch Size,4096,512,Changed,More gradient updates per epoch
+Loss Function,HuberLoss(delta=1.0),HuberLoss(delta=1.0),Same,Not the problem
+Hidden Dim,500,500,Same,
+Num Layers,7,7,Same,
+Dropout,0.0,0.0,Same,
+Grad Clipping,5.0,5.0,Same,
+Board-Grouped Split,80/20 no leakage,80/20 no leakage,Same,
+ZeroSum Correction,Output layer,Output layer,Same,
+Data Source,training_data_100k,training_data_100k,Same,

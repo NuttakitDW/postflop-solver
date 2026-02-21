@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-train_ranger_onecycle.py
+train_huber.py
 ----------------------------------------------------
-Modern turn-value net with up-to-date training stack.
+Fair comparison with train_ranger_onecycle.py.
+ONLY difference: HuberLoss instead of MSELoss.
+Everything else (architecture, optimizer, scaling, device, schedule) is identical.
 
-Outputs every epoch
--------------------
-models/100k_ranger_onecycle/
+Outputs
+-------
+models/100k_huber/
  ├─ best_ema.pt          ← checkpoint (EMA weights + scalers)
  ├─ loss_curve.png       ← two-panel plot (log + zoom)
  └─ losses.csv           ← per-epoch train / val loss
@@ -25,7 +27,7 @@ IN_DIM, OUT_DIM = BOARD_FEATS + 2*K, 2*K
 
 BASE = os.path.dirname(__file__)
 DATA_DIR = os.path.join(BASE, "..", "data",   "training_data_100k")
-OUT_DIR  = os.path.join(BASE, "..", "models", "100k_ranger_onecycle")
+OUT_DIR  = os.path.join(BASE, "..", "models", "100k_huber")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # -------- hyper-parameters ----------
@@ -40,8 +42,9 @@ CLIP         = 5.0
 TEST_FRAC    = 0.20
 EMA_DECAY    = 0.999
 EARLY_STOP   = 50          # epochs w/o val-improve
+HUBER_DELTA  = 1.0
 
-# -------- model ----------
+# -------- model (identical to ranger script) ----------
 class ZeroSum(nn.Module):
     def forward(self, raw, r_oop, r_ip):
         cfv_oop, cfv_ip = raw[:, :K], raw[:, K:]
@@ -66,7 +69,7 @@ class Net(nn.Module):
                        x[:, BOARD_FEATS:BOARD_FEATS+K],
                        x[:, BOARD_FEATS+K:])
 
-# -------- board-group split ----------
+# -------- board-group split (identical to ranger script) ----------
 def board_split(arr, frac=0.2, seed=42):
     keys = np.round(arr[:, :12], 4)
     ids  = {tuple(k): i for i,k in enumerate({tuple(r) for r in keys})}
@@ -87,7 +90,7 @@ def save_loss_plot(train_hist, test_hist):
     fig,(ax1,ax2)=plt.subplots(1,2,figsize=(11,4))
     ax1.plot(ep,tr,label="Train"); ax1.plot(ep,te,label="Test")
     ax1.set_yscale("log"); ax1.set_title("Full (log-y)")
-    ax1.grid(alpha=.3); ax1.set_xlabel("Epoch"); ax1.set_ylabel("MSE")
+    ax1.grid(alpha=.3); ax1.set_xlabel("Epoch"); ax1.set_ylabel("Huber Loss")
 
     ax2.plot(ep,tr,label="Train"); ax2.plot(ep,te,label="Test")
     allv=np.concatenate([tr,te]); lo,hi=allv.min(),np.percentile(allv,95)
@@ -111,7 +114,7 @@ def main():
     y=np.load(os.path.join(DATA_DIR,"targets.npy")).astype(np.float32)
     tr,te=board_split(x,TEST_FRAC,RNG_SEED)
 
-    # range-safe scaling -----------------------------------------------
+    # range-safe scaling (identical to ranger script) -------------------
     mu, std = x[tr,:BOARD_FEATS].mean(0), x[tr,:BOARD_FEATS].std(0)+1e-8
     x[:,:BOARD_FEATS]=(x[:,:BOARD_FEATS]-mu)/std
     y_scale=np.abs(y[tr]).max()+1e-8; y/=y_scale
@@ -123,21 +126,23 @@ def main():
 
     net=Net(HIDDEN,LAYERS,DROPOUT).to(dev)
 
-    # Ranger21 optimiser -----------------------------------------------
+    # Ranger21 optimiser (identical to ranger script) -------------------
     from ranger21 import Ranger21              # pip install ranger21
     opt=Ranger21(net.parameters(),
                  lr=LR_MAX, weight_decay=WEIGHT_DECAY,
                  num_epochs=EPOCHS,
                  num_batches_per_epoch=len(tl))
 
-    # One-Cycle LR ------------------------------------------------------
+    # One-Cycle LR (identical to ranger script) -------------------------
     tot_steps=len(tl)*EPOCHS
     sched=torch.optim.lr_scheduler.OneCycleLR(
         opt,max_lr=LR_MAX,total_steps=tot_steps,
         pct_start=0.1,anneal_strategy="cos",
         cycle_momentum=False,div_factor=10,final_div_factor=1e4
     )
-    loss_fn=nn.MSELoss()
+
+    # >>> ONLY DIFFERENCE: HuberLoss instead of MSELoss <<<
+    loss_fn=nn.HuberLoss(reduction="mean", delta=HUBER_DELTA)
 
     # EMA ---------------------------------------------------------------
     ema={n:p.clone().detach() for n,p in net.named_parameters() if p.requires_grad}
