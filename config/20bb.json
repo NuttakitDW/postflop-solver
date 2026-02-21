@@ -36,13 +36,15 @@
     "maxRaisesPerStreet": 4
   },
   "solver": {
-    "maxIterations": 1000,
+    "maxIterations": 1,
     "targetExploitabilityPercent": 0.3,
     "useCompression": true
   },
   "output": {
-    "filename": "out/20bb.flop",
+    "filename": "data/out/20bb.flop",
     "compressionLevel": 10,
     "memo": "20bb"
   }
 }
+
+

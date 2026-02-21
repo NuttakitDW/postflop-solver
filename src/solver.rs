@@ -13,13 +13,175 @@ use crate::game::{PostFlopGame, PostFlopNode};
 use crate::action_tree::Action;
 #[cfg(feature = "onnx")]
 use crate::card::*;
-#[cfg(feature = "onnx")]
-use crate::game::*;
 #[cfg(feature = "logging")]
 use log::debug;
 
 #[cfg(feature = "custom-alloc")]
 use crate::alloc::*;
+
+// =============================================================================
+// CFR Debug Logging (env var CFR_LOG=1|2|3)
+//   CFR_LOG=1  iteration-level + flop nodes (depth ≤ 2)
+//   CFR_LOG=2  all nodes in tree
+//   CFR_LOG=3  all nodes + per-hand detail
+//   CFR_LOG_ITERS=N  log only first N iterations (default 2)
+//
+// Logs are saved to: logs/<mode>_<timestamp>.log
+//   where mode = "standard" or "deepstack"
+// =============================================================================
+
+fn cfr_log_level() -> u32 {
+    use std::sync::OnceLock;
+    static LEVEL: OnceLock<u32> = OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        std::env::var("CFR_LOG").ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+fn cfr_log_max_iters() -> u32 {
+    use std::sync::OnceLock;
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("CFR_LOG_ITERS").ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2)
+    })
+}
+
+use std::sync::Mutex;
+
+static CFR_LOG_FILE: std::sync::OnceLock<Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+fn cfr_log_init(mode: &str) {
+    if cfr_log_level() == 0 { return; }
+    CFR_LOG_FILE.get_or_init(|| {
+        let _ = std::fs::create_dir_all("logs");
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let path = format!("logs/{}_{}.log", mode, secs);
+        eprintln!("[CFR_LOG] Saving log to: {}", path);
+        let file = std::fs::File::create(&path)
+            .expect("Failed to create CFR log file");
+        Mutex::new(file)
+    });
+}
+
+fn cfr_log_write(msg: &str) {
+    if let Some(file) = CFR_LOG_FILE.get() {
+        if let Ok(mut f) = file.lock() {
+            let _ = writeln!(f, "{}", msg);
+            let _ = f.flush();
+        }
+    }
+}
+
+macro_rules! cfr_log {
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        eprintln!("{}", msg);
+        cfr_log_write(&msg);
+    }};
+}
+
+thread_local! {
+    static CFR_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn cfr_depth() -> usize {
+    CFR_DEPTH.with(|d| d.get())
+}
+
+fn cfr_set_depth(d: usize) {
+    CFR_DEPTH.with(|c| c.set(d));
+}
+
+/// Should we log at the current depth?
+fn cfr_should_log() -> bool {
+    let level = cfr_log_level();
+    if level == 0 { return false; }
+    if level >= 2 { return true; }
+    // level 1: only log at depth ≤ 2 (flop nodes + turn chance)
+    cfr_depth() <= 2
+}
+
+fn cfr_indent() -> String {
+    "  ".repeat(cfr_depth())
+}
+
+/// Summary statistics for a float slice
+fn slice_stats(s: &[f32]) -> String {
+    if s.is_empty() { return "[]".to_string(); }
+    let sum: f64 = s.iter().map(|&x| x as f64).sum();
+    let mean = sum / s.len() as f64;
+    let min = s.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = s.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let nz = s.iter().filter(|&&x| x.abs() > 1e-10).count();
+    format!("[n={} nz={} sum={:.4} mean={:.6} min={:.4} max={:.4}]",
+            s.len(), nz, sum, mean, min, max)
+}
+
+/// Per-action mean strategy probabilities
+fn strategy_action_means(strategy: &[f32], num_actions: usize) -> String {
+    let num_hands = strategy.len() / num_actions;
+    if num_hands == 0 { return "[]".to_string(); }
+    let means: Vec<String> = (0..num_actions).map(|a| {
+        let slice = &strategy[a * num_hands..(a + 1) * num_hands];
+        let mean: f64 = slice.iter().map(|&x| x as f64).sum::<f64>() / num_hands as f64;
+        format!("a{}={:.4}", a, mean)
+    }).collect();
+    format!("[{}]", means.join(", "))
+}
+
+/// Per-action CFV mean values
+fn cfv_action_means(cfv_actions: &[f32], num_actions: usize) -> String {
+    let num_hands = cfv_actions.len() / num_actions;
+    if num_hands == 0 { return "[]".to_string(); }
+    let parts: Vec<String> = (0..num_actions).map(|a| {
+        let slice = &cfv_actions[a * num_hands..(a + 1) * num_hands];
+        let sum: f64 = slice.iter().map(|&x| x as f64).sum();
+        let mean = sum / num_hands as f64;
+        let min = slice.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        format!("a{}:mean={:.4},min={:.4},max={:.4}", a, mean, min, max)
+    }).collect();
+    format!("[{}]", parts.join(" | "))
+}
+
+/// Format an Action for display
+#[cfg(feature = "onnx")]
+fn fmt_action(action: &Action) -> String {
+    match action {
+        Action::None => "None".to_string(),
+        Action::Fold => "Fold".to_string(),
+        Action::Check => "Check".to_string(),
+        Action::Call => "Call".to_string(),
+        Action::Bet(amt) => format!("Bet({})", amt),
+        Action::Raise(amt) => format!("Raise({})", amt),
+        Action::AllIn(amt) => format!("AllIn({})", amt),
+        Action::Chance(card) => {
+            let s = crate::range::card_to_string(*card).unwrap_or_else(|_| format!("{}", card));
+            format!("Chance({})", s)
+        }
+    }
+}
+
+/// Per-action regret mean values (after update, regret = cfv_action - weighted_cfv)
+fn regret_action_means(cfv_actions: &[f32], weighted_cfv: &[f32], num_actions: usize) -> String {
+    let num_hands = cfv_actions.len() / num_actions;
+    if num_hands == 0 { return "[]".to_string(); }
+    let parts: Vec<String> = (0..num_actions).map(|a| {
+        let slice = &cfv_actions[a * num_hands..(a + 1) * num_hands];
+        let regret_mean: f64 = slice.iter().zip(weighted_cfv.iter()).map(|(&c, &w)| {
+            (c - w) as f64
+        }).sum::<f64>() / num_hands as f64;
+        format!("a{}={:.4}", a, regret_mean)
+    }).collect();
+    format!("[{}]", parts.join(", "))
+}
 
 struct DiscountParams {
     alpha_t: f32,
@@ -168,7 +330,23 @@ pub fn solve<T: Game>(
         }
 
         // alternating updates
+        if cfr_log_level() >= 1 && t < cfr_log_max_iters() {
+            cfr_log_init("standard");
+            cfr_log!("\n{}", "=".repeat(80));
+            cfr_log!("=== [STANDARD CFR] ITERATION {} | alpha={:.4} beta={:.4} gamma={:.4} ===",
+                      t, params.alpha_t, params.beta_t, params.gamma_t);
+        }
         for player in 0..2 {
+            if cfr_log_level() >= 1 && t < cfr_log_max_iters() {
+                let pname = if player == 0 { "OOP" } else { "IP" };
+                cfr_log!("\n--- iter={} player={} ({}) num_hands={} ---",
+                          t, player, pname, game.num_private_hands(player));
+                cfr_log!("  initial_weights(player): {}",
+                          slice_stats(game.initial_weights(player)));
+                cfr_log!("  initial_weights(opponent): {}",
+                          slice_stats(game.initial_weights(player ^ 1)));
+            }
+            CFR_DEPTH.with(|d| d.set(0));
             let mut result = Vec::with_capacity(game.num_private_hands(player));
             solve_recursive(
                 result.spare_capacity_mut(),
@@ -316,9 +494,17 @@ fn solve_recursive<T: Game>(
     cfreach: &[f32],
     params: &DiscountParams,
 ) {
+    let log = cfr_should_log();
+    let depth = cfr_depth();
+
     // return the counterfactual values when the `node` is terminal
     if node.is_terminal() {
         game.evaluate(result, node, player, cfreach);
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] TERMINAL p={} cfv={} cfreach={}",
+                      cfr_indent(), depth, player, slice_stats(r), slice_stats(cfreach));
+        }
         return;
     }
 
@@ -327,6 +513,10 @@ fn solve_recursive<T: Game>(
 
     // simply recurse when the number of actions is one
     if num_actions == 1 && !node.is_chance() {
+        if log {
+            cfr_log!("{}[d{}] PASSTHROUGH (1 action) p={}",
+                      cfr_indent(), depth, player);
+        }
         let child = &mut node.play(0);
         solve_recursive(result, game, child, player, cfreach, params);
         return;
@@ -340,6 +530,13 @@ fn solve_recursive<T: Game>(
 
     // if the `node` is chance
     if node.is_chance() {
+        let chance_factor = game.chance_factor(node);
+        if log {
+            cfr_log!("{}[d{}] CHANCE p={} actions={} chance_factor={} cfreach={}",
+                      cfr_indent(), depth, player, num_actions, chance_factor,
+                      slice_stats(cfreach));
+        }
+
         // update the reach probabilities
         #[cfg(feature = "custom-alloc")]
         let mut cfreach_updated = Vec::with_capacity_in(cfreach.len(), StackAlloc);
@@ -348,12 +545,13 @@ fn solve_recursive<T: Game>(
         mul_slice_scalar_uninit(
             cfreach_updated.spare_capacity_mut(),
             cfreach,
-            1.0 / game.chance_factor(node) as f32,
+            1.0 / chance_factor as f32,
         );
         unsafe { cfreach_updated.set_len(cfreach.len()) };
 
         // compute the counterfactual values of each action
         for_each_child(node, |action| {
+            cfr_set_depth(depth + 1);
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
@@ -363,6 +561,7 @@ fn solve_recursive<T: Game>(
                 params,
             );
         });
+        cfr_set_depth(depth);
 
         // use 64-bit floating point values
         #[cfg(feature = "custom-alloc")]
@@ -396,11 +595,25 @@ fn solve_recursive<T: Game>(
         result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
             r.write(v as f32);
         });
+
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] CHANCE RESULT p={} cfv={} iso_chances={}",
+                      cfr_indent(), depth, player, slice_stats(r), isomorphic_chances.len());
+        }
     }
     // if the current player is `player`
     else if node.player() == player {
+        if log {
+            let pname = if node.player() == 0 { "OOP" } else { "IP" };
+            cfr_log!("{}[d{}] PLAYER_NODE ({}) p={} actions={} cfreach={}",
+                      cfr_indent(), depth, pname, player, num_actions,
+                      slice_stats(cfreach));
+        }
+
         // compute the counterfactual values of each action
         for_each_child(node, |action| {
+            cfr_set_depth(depth + 1);
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
@@ -410,6 +623,7 @@ fn solve_recursive<T: Game>(
                 params,
             );
         });
+        cfr_set_depth(depth);
 
         // compute the strategy by regret-maching algorithm
         let mut strategy = if game.is_compression_enabled() {
@@ -422,10 +636,28 @@ fn solve_recursive<T: Game>(
         let locking = game.locking_strategy(node);
         apply_locking_strategy(&mut strategy, locking);
 
+        if log {
+            cfr_log!("{}[d{}]   strategy_means: {}",
+                      cfr_indent(), depth, strategy_action_means(&strategy, num_actions));
+        }
+
         // sum up the counterfactual values
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
+
+        if log {
+            cfr_log!("{}[d{}]   cfv_per_action: {}",
+                      cfr_indent(), depth, cfv_action_means(&cfv_actions, num_actions));
+        }
+
         let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+        if log {
+            cfr_log!("{}[d{}]   weighted_cfv: {}",
+                      cfr_indent(), depth, slice_stats(result));
+            cfr_log!("{}[d{}]   instant_regret: {}",
+                      cfr_indent(), depth, regret_action_means(&cfv_actions, result, num_actions));
+        }
 
         if game.is_compression_enabled() {
             // update the cumulative strategy
@@ -494,6 +726,13 @@ fn solve_recursive<T: Game>(
     }
     // if the current player is not `player`
     else {
+        let opp_name = if node.player() == 0 { "OOP" } else { "IP" };
+        if log {
+            cfr_log!("{}[d{}] OPP_NODE ({}) p={} actions={} cfreach={}",
+                      cfr_indent(), depth, opp_name, player, num_actions,
+                      slice_stats(cfreach));
+        }
+
         // compute the strategy by regret-matching algorithm
         let mut cfreach_actions = if game.is_compression_enabled() {
             regret_matching_compressed(node.regrets_compressed(), num_actions)
@@ -505,6 +744,11 @@ fn solve_recursive<T: Game>(
         let locking = game.locking_strategy(node);
         apply_locking_strategy(&mut cfreach_actions, locking);
 
+        if log {
+            cfr_log!("{}[d{}]   opp_strategy_means: {}",
+                      cfr_indent(), depth, strategy_action_means(&cfreach_actions, num_actions));
+        }
+
         // update the reach probabilities
         let row_size = cfreach.len();
         cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
@@ -513,6 +757,7 @@ fn solve_recursive<T: Game>(
 
         // compute the counterfactual values of each action
         for_each_child(node, |action| {
+            cfr_set_depth(depth + 1);
             solve_recursive(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
@@ -522,11 +767,18 @@ fn solve_recursive<T: Game>(
                 params,
             );
         });
+        cfr_set_depth(depth);
 
         // sum up the counterfactual values
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
         sum_slices_uninit(result, &cfv_actions);
+
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] OPP_RESULT ({}) cfv={}",
+                      cfr_indent(), depth, opp_name, slice_stats(r));
+        }
     }
 }
 
@@ -725,7 +977,20 @@ pub fn solve_bucketed(
 
         let params = DiscountParams::new(t, false);
 
+        if cfr_log_level() >= 1 && t < cfr_log_max_iters() {
+            cfr_log_init("deepstack");
+            cfr_log!("\n{}", "=".repeat(80));
+            cfr_log!("=== [BUCKETED CFR] ITERATION {} | alpha={:.4} beta={:.4} gamma={:.4} ===",
+                      t, params.alpha_t, params.beta_t, params.gamma_t);
+        }
+
         for player in 0..2 {
+            if cfr_log_level() >= 1 && t < cfr_log_max_iters() {
+                let pname = if player == 0 { "OOP" } else { "IP" };
+                cfr_log!("\n--- [BUCKETED] iter={} player={} ({}) num_hands={} ---",
+                          t, player, pname, game.num_private_hands(player));
+            }
+            CFR_DEPTH.with(|d| d.set(0));
             let mut result = Vec::with_capacity(game.num_private_hands(player));
             solve_recursive_bucketed(
                 result.spare_capacity_mut(),
@@ -733,6 +998,7 @@ pub fn solve_bucketed(
                 &mut root,
                 player,
                 game.initial_weights(player ^ 1),
+                game.initial_weights(player),
                 &params,
                 net,
                 &bucket_cache,
@@ -826,6 +1092,7 @@ pub fn solve_with_locked_flop(
                 &mut root,
                 player,
                 game.initial_weights(player ^ 1),
+                game.initial_weights(player),
                 &params,
                 net,
                 &bucket_cache,
@@ -928,13 +1195,23 @@ fn solve_recursive_bucketed(
     node: &mut PostFlopNode,
     player: usize,
     cfreach: &[f32],
+    player_reach: &[f32],
     params: &DiscountParams,
     net: &TurnValueNet,
     bucket_cache: &BucketCache,
 ) {
+    let log = cfr_should_log();
+    let depth = cfr_depth();
+
     // Terminal node
     if node.is_terminal() {
         game.evaluate(result, node, player, cfreach);
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] TERMINAL p={} prev={} cfv={}",
+                      cfr_indent(), depth, player,
+                      fmt_action(&node.prev_action()), slice_stats(r));
+        }
         return;
     }
 
@@ -943,14 +1220,28 @@ fn solve_recursive_bucketed(
 
     // Single action pass-through
     if num_actions == 1 && !node.is_chance() {
+        if log {
+            cfr_log!("{}[d{}] PASSTHROUGH p={} prev={}",
+                      cfr_indent(), depth, player, fmt_action(&node.prev_action()));
+        }
         let child = &mut node.play(0);
-        solve_recursive_bucketed(result, game, child, player, cfreach, params, net, bucket_cache);
+        solve_recursive_bucketed(result, game, child, player, cfreach, player_reach, params, net, bucket_cache);
         return;
     }
 
     // Turn chance node: use bucketed net instead of recursing into turn+river subtree
     if node.is_chance() && node.turn() == NOT_DEALT {
-        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
+        if log {
+            cfr_log!("{}[d{}] TURN_CHANCE (NETWORK) p={} actions={} cfreach={} player_reach={}",
+                      cfr_indent(), depth, player, num_actions,
+                      slice_stats(cfreach), slice_stats(player_reach));
+        }
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, player_reach, net, bucket_cache);
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] TURN_CHANCE RESULT p={} cfv={}",
+                      cfr_indent(), depth, player, slice_stats(r));
+        }
         return;
     }
 
@@ -958,6 +1249,11 @@ fn solve_recursive_bucketed(
 
     if node.is_chance() {
         // River chance node: parallel recursive handling
+        if log {
+            cfr_log!("{}[d{}] RIVER_CHANCE p={} actions={} turn={}",
+                      cfr_indent(), depth, player, num_actions,
+                      crate::range::card_to_string(node.turn()).unwrap_or_default());
+        }
         let mut cfreach_updated = Vec::with_capacity(cfreach.len());
         mul_slice_scalar_uninit(
             cfreach_updated.spare_capacity_mut(),
@@ -967,17 +1263,20 @@ fn solve_recursive_bucketed(
         unsafe { cfreach_updated.set_len(cfreach.len()) };
 
         for_each_child(node, |action| {
+            cfr_set_depth(depth + 1);
             solve_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 &cfreach_updated,
+                player_reach,
                 params,
                 net,
                 bucket_cache,
             );
         });
+        cfr_set_depth(depth);
 
         let mut result_f64 = Vec::with_capacity(num_hands);
         let mut cfv_actions = cfv_actions.lock();
@@ -999,21 +1298,26 @@ fn solve_recursive_bucketed(
         result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
             r.write(v as f32);
         });
+
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] RIVER_CHANCE RESULT cfv={}",
+                      cfr_indent(), depth, slice_stats(r));
+        }
     } else if node.player() == player {
         // Current player's node: parallel compute + regret update
-        for_each_child(node, |action| {
-            solve_recursive_bucketed(
-                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
-                game,
-                &mut node.play(action),
-                player,
-                cfreach,
-                params,
-                net,
-                bucket_cache,
-            );
-        });
+        let pname = if player == 0 { "OOP" } else { "IP" };
+        if log {
+            cfr_log!("{}[d{}] PLAYER_NODE ({}) p={} prev={} actions={} turn={} river={}",
+                      cfr_indent(), depth, pname, player,
+                      fmt_action(&node.prev_action()), num_actions,
+                      crate::range::card_to_string(node.turn()).unwrap_or_else(|_| "?".into()),
+                      crate::range::card_to_string(node.river()).unwrap_or_else(|_| "?".into()));
+            cfr_log!("{}[d{}]   cfreach={}", cfr_indent(), depth, slice_stats(cfreach));
+            cfr_log!("{}[d{}]   player_reach={}", cfr_indent(), depth, slice_stats(player_reach));
+        }
 
+        // Compute strategy BEFORE recursion (needed for player_reach propagation)
         let mut strategy = if game.is_compression_enabled() {
             regret_matching_compressed(node.regrets_compressed(), num_actions)
         } else {
@@ -1023,9 +1327,60 @@ fn solve_recursive_bucketed(
         let locking = game.locking_strategy(node);
         apply_locking_strategy(&mut strategy, locking);
 
+        if log {
+            cfr_log!("{}[d{}]   strategy_means: {}",
+                      cfr_indent(), depth, strategy_action_means(&strategy, num_actions));
+        }
+
+        // Compute player_reach for each action
+        let mut player_reach_actions = vec![0.0f32; num_actions * num_hands];
+        for a in 0..num_actions {
+            let offset = a * num_hands;
+            for h in 0..num_hands {
+                player_reach_actions[offset + h] = player_reach[h] * strategy[offset + h];
+            }
+        }
+
+        if log {
+            for a in 0..num_actions {
+                let pr_slice = row(&player_reach_actions, a, num_hands);
+                cfr_log!("{}[d{}]   player_reach_a{}: {}",
+                          cfr_indent(), depth, a, slice_stats(pr_slice));
+            }
+        }
+
+        for_each_child(node, |action| {
+            cfr_set_depth(depth + 1);
+            solve_recursive_bucketed(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                cfreach,
+                row(&player_reach_actions, action, num_hands),
+                params,
+                net,
+                bucket_cache,
+            );
+        });
+        cfr_set_depth(depth);
+
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
+
+        if log {
+            cfr_log!("{}[d{}]   cfv_per_action: {}",
+                      cfr_indent(), depth, cfv_action_means(&cfv_actions, num_actions));
+        }
+
         let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+        if log {
+            cfr_log!("{}[d{}]   weighted_cfv: {}",
+                      cfr_indent(), depth, slice_stats(result));
+            cfr_log!("{}[d{}]   instant_regret: {}",
+                      cfr_indent(), depth, regret_action_means(&cfv_actions, result, num_actions));
+        }
 
         if game.is_compression_enabled() {
             let scale = node.strategy_scale();
@@ -1078,6 +1433,14 @@ fn solve_recursive_bucketed(
         }
     } else {
         // Opponent's node: parallel compute
+        let opp_name = if node.player() == 0 { "OOP" } else { "IP" };
+        if log {
+            cfr_log!("{}[d{}] OPP_NODE ({}) p={} prev={} actions={} cfreach={}",
+                      cfr_indent(), depth, opp_name, player,
+                      fmt_action(&node.prev_action()), num_actions,
+                      slice_stats(cfreach));
+        }
+
         let mut cfreach_actions = if game.is_compression_enabled() {
             regret_matching_compressed(node.regrets_compressed(), num_actions)
         } else {
@@ -1087,27 +1450,41 @@ fn solve_recursive_bucketed(
         let locking = game.locking_strategy(node);
         apply_locking_strategy(&mut cfreach_actions, locking);
 
+        if log {
+            cfr_log!("{}[d{}]   opp_strategy_means: {}",
+                      cfr_indent(), depth, strategy_action_means(&cfreach_actions, num_actions));
+        }
+
         let row_size = cfreach.len();
         cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
             mul_slice(row, cfreach);
         });
 
         for_each_child(node, |action| {
+            cfr_set_depth(depth + 1);
             solve_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
                 game,
                 &mut node.play(action),
                 player,
                 row(&cfreach_actions, action, row_size),
+                player_reach,
                 params,
                 net,
                 bucket_cache,
             );
         });
+        cfr_set_depth(depth);
 
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
         sum_slices_uninit(result, &cfv_actions);
+
+        if log {
+            let r = unsafe { &*(result as *const _ as *const [f32]) };
+            cfr_log!("{}[d{}] OPP_RESULT ({}) cfv={}",
+                      cfr_indent(), depth, opp_name, slice_stats(r));
+        }
     }
 }
 
@@ -1330,9 +1707,11 @@ pub(crate) fn bucketed_predict_turn_cfv(
     node: &PostFlopNode,
     player: usize,
     cfreach: &[f32],
+    player_reach: &[f32],
     net: &TurnValueNet,
     bucket_cache: &BucketCache,
 ) {
+    let log = cfr_should_log();
     let num_actions = node.num_actions();
     let num_hands = result.len();
     let opponent = player ^ 1;
@@ -1341,6 +1720,18 @@ pub(crate) fn bucketed_predict_turn_cfv(
     let stack = game.tree_config().effective_stack as f32;
     let flop = game.card_config().flop;
 
+    if log {
+        let indent = cfr_indent();
+        let d = cfr_depth();
+        cfr_log!("{}[d{}] bucketed_predict_turn_cfv: p={} pot={} stack={} flop=[{},{},{}]",
+                  indent, d, player, pot, stack,
+                  crate::range::card_to_string(flop[0]).unwrap_or_default(),
+                  crate::range::card_to_string(flop[1]).unwrap_or_default(),
+                  crate::range::card_to_string(flop[2]).unwrap_or_default());
+        cfr_log!("{}[d{}]   player_reach (input to network): {}", indent, d, slice_stats(player_reach));
+        cfr_log!("{}[d{}]   cfreach (opponent, input to network): {}", indent, d, slice_stats(cfreach));
+    }
+
     // Build full 1326-element reach arrays
     let mut reach_oop_all = [0.0f32; 1326];
     let mut reach_ip_all = [0.0f32; 1326];
@@ -1348,13 +1739,13 @@ pub(crate) fn bucketed_predict_turn_cfv(
     // Use full-scale reaches (no chance_div scaling).
     // Training data stores reaches at full scale, so inference must match.
     // The averaging across turn cards is handled by dividing by total_turn_cards below.
-    let player_weights = game.initial_weights(player);
+    // player_reach reflects the current player's strategy-filtered range at this node.
     for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
         let combo_idx = card_pair_to_index(c1, c2);
         if player == 0 {
-            reach_oop_all[combo_idx] = player_weights[hand_idx];
+            reach_oop_all[combo_idx] = player_reach[hand_idx];
         } else {
-            reach_ip_all[combo_idx] = player_weights[hand_idx];
+            reach_ip_all[combo_idx] = player_reach[hand_idx];
         }
     }
     for (hand_idx, &(c1, c2)) in game.private_cards(opponent).iter().enumerate() {
@@ -1364,6 +1755,13 @@ pub(crate) fn bucketed_predict_turn_cfv(
         } else {
             reach_ip_all[combo_idx] = cfreach[hand_idx];
         }
+    }
+
+    if log {
+        let indent = cfr_indent();
+        let d = cfr_depth();
+        cfr_log!("{}[d{}]   reach_oop_all (1326): {}", indent, d, slice_stats(&reach_oop_all));
+        cfr_log!("{}[d{}]   reach_ip_all (1326): {}", indent, d, slice_stats(&reach_ip_all));
     }
 
     // Collect turn cards from chance children
@@ -1403,6 +1801,16 @@ pub(crate) fn bucketed_predict_turn_cfv(
         let cfv_oop_buckets = &output[..k];
         let cfv_ip_buckets = &output[k..2 * k];
 
+        if log && cfr_log_level() >= 2 {
+            let indent = cfr_indent();
+            let d = cfr_depth();
+            let tc = crate::range::card_to_string(turn_card).unwrap_or_default();
+            cfr_log!("{}[d{}]   turn_card={}: bucket_oop={} bucket_ip={}",
+                      indent, d, tc, slice_stats(&bucket_range_oop), slice_stats(&bucket_range_ip));
+            cfr_log!("{}[d{}]     net_out_oop={} net_out_ip={}",
+                      indent, d, slice_stats(cfv_oop_buckets), slice_stats(cfv_ip_buckets));
+        }
+
         // Expand bucket CFVs to per-combo (1326)
         let cfv_all = if player_cfv_idx == 0 {
             expand_cfv_from_buckets(cfv_oop_buckets, mapping)
@@ -1416,6 +1824,15 @@ pub(crate) fn bucketed_predict_turn_cfv(
             let cfv = cfv_all[combo_idx] * pot; // denormalize
             cfv_actions[action * num_hands + hand_idx] = cfv;
             result_f64[hand_idx] += cfv as f64;
+        }
+
+        if log && cfr_log_level() >= 2 {
+            let indent = cfr_indent();
+            let d = cfr_depth();
+            let tc = crate::range::card_to_string(turn_card).unwrap_or_default();
+            let cfv_slice = &cfv_actions[action * num_hands..(action + 1) * num_hands];
+            cfr_log!("{}[d{}]     turn_card={} per_hand_cfv: {}",
+                      indent, d, tc, slice_stats(cfv_slice));
         }
     }
 
@@ -1441,6 +1858,13 @@ pub(crate) fn bucketed_predict_turn_cfv(
     // each child, making each child's CFV proportional to 1/N. Summing gives the
     // correct average. Here we sum full-scale per-turn CFVs, so we must divide.
     let total_turn_cards = (num_actions + isomorphic_chances.len()) as f64;
+
+    if log {
+        let indent = cfr_indent();
+        let d = cfr_depth();
+        cfr_log!("{}[d{}]   total_turn_cards={} (actions={} + iso={})",
+                  indent, d, total_turn_cards, num_actions, isomorphic_chances.len());
+    }
 
     // Write final result
     result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
@@ -2937,6 +3361,150 @@ mod tests {
             exploit_locked_pct,
             exploit_std_pct,
         );
+    }
+
+    /// Compare model-predicted turn CFVs vs standard solver ground truth.
+    ///
+    /// For each turn card on the AdKc2d flop:
+    /// 1. Build a Turn-start game with pot+all-in (matching training data)
+    /// 2. Solve with standard DCFR → ground truth per-hand CFVs
+    /// 3. Bucket reaches → model predict → expand back → predicted CFVs
+    /// 4. Compare (pot-normalized)
+    #[test]
+    #[cfg(feature = "onnx")]
+    fn test_model_cfv_vs_ground_truth() {
+        use crate::bucketing::{
+            compute_board_features, compute_buckets, expand_cfv_from_buckets,
+            project_range_to_buckets, DEFAULT_K,
+        };
+        use crate::card::card_pair_to_index;
+        use crate::net::TurnValueNet;
+        use crate::utility::compute_cfvalue_recursive;
+
+        let model_path = "models/toy_20bb/model.onnx";
+        if !std::path::Path::new(model_path).exists() {
+            eprintln!("Skipping test: {} not found", model_path);
+            return;
+        }
+
+        let net = TurnValueNet::new(model_path, crate::net::Device::Cpu)
+            .expect("Failed to load model");
+
+        let flop: [Card; 3] = [1, 44, 49]; // 2d, Kc, Ad
+        let pot = 1000;
+        let stack = 3000;
+        let pot_f = pot as f32;
+
+        // Bet sizes matching training data: pot + all-in
+        let bet: BetSizeOptions = ("100%,a", "a").try_into().unwrap();
+
+        // Test a few turn cards
+        let flop_mask: u64 = (1u64 << flop[0]) | (1u64 << flop[1]) | (1u64 << flop[2]);
+        let turn_cards: Vec<Card> = (0u8..52)
+            .filter(|c| flop_mask & (1u64 << c) == 0)
+            .take(5) // test 5 turn cards
+            .collect();
+
+        let k = DEFAULT_K;
+
+        for &turn_card in &turn_cards {
+            let board = [flop[0], flop[1], flop[2], turn_card];
+            let card_name = crate::range::card_to_string(turn_card).unwrap();
+
+            // Build and solve Turn-start game with uniform ranges
+            let card_config = CardConfig {
+                range: [Range::ones(); 2],
+                flop,
+                turn: turn_card,
+                river: NOT_DEALT,
+            };
+            let tree_config = TreeConfig {
+                initial_state: BoardState::Turn,
+                starting_pot: pot,
+                effective_stack: stack,
+                turn_bet_sizes: [bet.clone(), bet.clone()],
+                river_bet_sizes: [bet.clone(), bet.clone()],
+                ..Default::default()
+            };
+            let action_tree = ActionTree::new(tree_config).unwrap();
+            let mut game = PostFlopGame::with_config(card_config, action_tree).unwrap();
+            game.allocate_memory(false);
+            solve(&mut game, 500, 0.0, false);
+
+            // Extract ground truth per-hand CFVs (pot-normalized)
+            let mut gt_cfv = [[0.0f32; 1326]; 2];
+            for player in 0..2 {
+                let num_hands = game.num_private_hands(player);
+                let cfreach = game.initial_weights(player ^ 1).to_vec();
+                let mut result = vec![MaybeUninit::<f32>::uninit(); num_hands];
+                {
+                    let mut root = game.root();
+                    compute_cfvalue_recursive(
+                        &mut result, &game, &mut root, player, &cfreach, false,
+                    );
+                }
+                for (hand_idx, &(c1, c2)) in game.private_cards(player).iter().enumerate() {
+                    let combo_idx = card_pair_to_index(c1, c2);
+                    gt_cfv[player][combo_idx] =
+                        unsafe { result[hand_idx].assume_init() } / pot_f;
+                }
+            }
+
+            // Model prediction: bucket → infer → expand
+            let mapping = compute_buckets(&board, k);
+            let board_features = compute_board_features(&board, pot_f, stack as f32);
+
+            // Uniform reaches for all non-blocked combos
+            let mut reach_all = [0.0f32; 1326];
+            for combo_idx in 0..1326 {
+                let (c1, c2) = crate::card::index_to_card_pair(combo_idx);
+                let hand_mask = (1u64 << c1) | (1u64 << c2);
+                if hand_mask & ((1u64 << board[0]) | (1u64 << board[1]) | (1u64 << board[2]) | (1u64 << board[3])) == 0 {
+                    reach_all[combo_idx] = 1.0;
+                }
+            }
+
+            let bucket_range = project_range_to_buckets(&reach_all, &mapping);
+            let mut input = Vec::with_capacity(15 + 2 * k);
+            input.extend_from_slice(&board_features);
+            input.extend_from_slice(&bucket_range); // OOP
+            input.extend_from_slice(&bucket_range); // IP (same uniform range)
+
+            let output = net.predict(&input).expect("Prediction failed");
+            let pred_cfv_oop = expand_cfv_from_buckets(&output[..k], &mapping);
+            let pred_cfv_ip = expand_cfv_from_buckets(&output[k..2 * k], &mapping);
+
+            // Compare
+            let mut mse_oop = 0.0f64;
+            let mut mse_ip = 0.0f64;
+            let mut count = 0usize;
+            let mut max_diff: f32 = 0.0;
+
+            for combo_idx in 0..1326 {
+                if reach_all[combo_idx] == 0.0 {
+                    continue;
+                }
+                count += 1;
+
+                let diff_oop = pred_cfv_oop[combo_idx] - gt_cfv[0][combo_idx];
+                let diff_ip = pred_cfv_ip[combo_idx] - gt_cfv[1][combo_idx];
+                mse_oop += (diff_oop as f64).powi(2);
+                mse_ip += (diff_ip as f64).powi(2);
+                max_diff = max_diff.max(diff_oop.abs()).max(diff_ip.abs());
+            }
+
+            mse_oop /= count as f64;
+            mse_ip /= count as f64;
+
+            println!(
+                "Turn {} | RMSE_oop={:.4} RMSE_ip={:.4} max_diff={:.4} | {} combos",
+                card_name,
+                (mse_oop as f64).sqrt(),
+                (mse_ip as f64).sqrt(),
+                max_diff,
+                count,
+            );
+        }
     }
 }
 

@@ -6,5 +6,6 @@ CLAUDE.md
 
 data
 models
+logs
 todo
 __pycache__

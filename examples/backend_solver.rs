@@ -511,6 +511,7 @@ fn run_solver_deepstack(
     model_path: &str,
     device: &str,
     locked_flop: bool,
+    flop_only: bool,
     flop_iters: u32,
     turnriver_iters: u32,
 ) -> SolverResult {
@@ -704,7 +705,19 @@ fn run_solver_deepstack(
     // Solve
     let solve_start = Instant::now();
 
-    let (exploitability_percent, true_exploitability) = if locked_flop {
+    let (exploitability_percent, true_exploitability) = if flop_only {
+        // Phase 1 only: solve flop with network, finalize, save — no exploitability
+        println!("Mode: FLOP-ONLY (iters={})", config.solver.max_iterations);
+        solve_bucketed(
+            &mut game,
+            config.solver.max_iterations,
+            target_exploitability,
+            true,
+            &net,
+        );
+        eprintln!("Flop-only solve complete. Skipping exploitability calculation.");
+        (0.0, 0.0)
+    } else if locked_flop {
         // Two-phase: deepstack flop + standard turn/river with locked flop strategy
         println!("Mode: LOCKED-FLOP (flop_iters={}, turnriver_iters={})", flop_iters, turnriver_iters);
         let exploit = solve_with_locked_flop(
@@ -783,7 +796,7 @@ fn run_solver_deepstack(
 }
 
 #[cfg(not(feature = "onnx"))]
-fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str, _device: &str, _locked_flop: bool, _flop_iters: u32, _turnriver_iters: u32) -> SolverResult {
+fn run_solver_deepstack(_config: &SolverConfig, _model_path: &str, _device: &str, _locked_flop: bool, _flop_only: bool, _flop_iters: u32, _turnriver_iters: u32) -> SolverResult {
     create_error_result("Deepstack mode requires the 'onnx' feature. Rebuild with --features onnx".to_string())
 }
 
@@ -826,6 +839,7 @@ fn main() {
     let mut deepstack_model = None;
     let mut device = "cpu".to_string();
     let mut locked_flop = false;
+    let mut flop_only = false;
     let mut flop_iters: u32 = 300;
     let mut turnriver_iters: u32 = 300;
     {
@@ -842,6 +856,10 @@ fn main() {
                 }
                 "--locked-flop" => {
                     locked_flop = true;
+                    i += 1;
+                }
+                "--flop-only" => {
+                    flop_only = true;
                     i += 1;
                 }
                 "--flop-iters" if i + 1 < args.len() => {
@@ -872,7 +890,9 @@ fn main() {
     println!("Config: {}", config_path);
     println!("Threads: {}", rayon::current_num_threads());
     if let Some(ref model) = deepstack_model {
-        if locked_flop {
+        if flop_only {
+            println!("Mode: FLOP-ONLY DEEPSTACK (model: {}, device: {})", model, device);
+        } else if locked_flop {
             println!("Mode: LOCKED-FLOP DEEPSTACK (model: {}, device: {})", model, device);
             println!("Flop iterations: {}, Turn/River iterations: {}", flop_iters, turnriver_iters);
         } else {
@@ -895,7 +915,7 @@ fn main() {
     println!();
 
     let result = if let Some(ref model_path) = deepstack_model {
-        run_solver_deepstack(&config, model_path, &device, locked_flop, flop_iters, turnriver_iters)
+        run_solver_deepstack(&config, model_path, &device, locked_flop, flop_only, flop_iters, turnriver_iters)
     } else {
         run_solver(&config)
     };

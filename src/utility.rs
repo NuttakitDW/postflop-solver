@@ -862,6 +862,7 @@ pub(crate) fn finalize_bucketed(
             &mut game.root(),
             player,
             game.initial_weights(player ^ 1),
+            game.initial_weights(player),
             true,
             net,
             bucket_cache,
@@ -901,6 +902,7 @@ fn compute_mes_ev_bucketed(
             &game.root(),
             player,
             reach[player ^ 1],
+            reach[player],
             net,
             bucket_cache,
         );
@@ -918,6 +920,7 @@ fn compute_cfvalue_recursive_bucketed(
     node: &mut PostFlopNode,
     player: usize,
     cfreach: &[f32],
+    player_reach: &[f32],
     save_cfvalues: bool,
     net: &TurnValueNet,
     bucket_cache: &BucketCache,
@@ -931,7 +934,7 @@ fn compute_cfvalue_recursive_bucketed(
     let num_hands = result.len();
 
     if node.is_chance() && node.turn() == NOT_DEALT {
-        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, player_reach, net, bucket_cache);
 
         if save_cfvalues && node.cfvalue_storage_player() == Some(player) {
             let result = unsafe { &*(result as *const _ as *const [f32]) };
@@ -964,6 +967,7 @@ fn compute_cfvalue_recursive_bucketed(
                 &mut node.play(action),
                 player,
                 &cfreach_updated,
+                player_reach,
                 save_cfvalues,
                 net,
                 bucket_cache,
@@ -1007,6 +1011,27 @@ fn compute_cfvalue_recursive_bucketed(
             }
         }
     } else if node.player() == player {
+        // Compute strategy BEFORE recursion for player_reach propagation
+        let mut strategy = if game.is_compression_enabled() {
+            normalized_strategy_compressed(node.strategy_compressed(), num_actions)
+        } else {
+            normalized_strategy(node.strategy(), num_actions)
+        };
+
+        let locking = game.locking_strategy(node);
+        if !locking.is_empty() {
+            apply_locking_strategy(&mut strategy, locking);
+        }
+
+        // Compute player_reach for each action
+        let mut player_reach_actions = vec![0.0f32; num_actions * num_hands];
+        for a in 0..num_actions {
+            let offset = a * num_hands;
+            for h in 0..num_hands {
+                player_reach_actions[offset + h] = player_reach[h] * strategy[offset + h];
+            }
+        }
+
         for_each_child(node, |action| {
             compute_cfvalue_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
@@ -1014,29 +1039,16 @@ fn compute_cfvalue_recursive_bucketed(
                 &mut node.play(action),
                 player,
                 cfreach,
+                row(&player_reach_actions, action, num_hands),
                 save_cfvalues,
                 net,
                 bucket_cache,
             );
         });
 
-        let strategy = if game.is_compression_enabled() {
-            normalized_strategy_compressed(node.strategy_compressed(), num_actions)
-        } else {
-            normalized_strategy(node.strategy(), num_actions)
-        };
-
-        let locking = game.locking_strategy(node);
         let mut cfv_actions = cfv_actions.lock();
         unsafe { cfv_actions.set_len(num_actions * num_hands) };
-
-        if locking.is_empty() {
-            fma_slices_uninit(result, &strategy, &cfv_actions);
-        } else {
-            let mut strategy = strategy;
-            apply_locking_strategy(&mut strategy, locking);
-            fma_slices_uninit(result, &strategy, &cfv_actions);
-        }
+        fma_slices_uninit(result, &strategy, &cfv_actions);
 
         if save_cfvalues && node.cfvalue_storage_player() == Some(player) {
             let result = unsafe { &*(result as *const _ as *const [f32]) };
@@ -1070,6 +1082,7 @@ fn compute_cfvalue_recursive_bucketed(
                 &mut node.play(action),
                 player,
                 row(&cfreach_actions, action, row_size),
+                player_reach,
                 save_cfvalues,
                 net,
                 bucket_cache,
@@ -1089,6 +1102,7 @@ fn compute_best_cfv_recursive_bucketed(
     node: &PostFlopNode,
     player: usize,
     cfreach: &[f32],
+    player_reach: &[f32],
     net: &TurnValueNet,
     bucket_cache: &BucketCache,
 ) {
@@ -1103,13 +1117,13 @@ fn compute_best_cfv_recursive_bucketed(
     if num_actions == 1 && !node.is_chance() {
         let child = &node.play(0);
         compute_best_cfv_recursive_bucketed(
-            result, game, child, player, cfreach, net, bucket_cache,
+            result, game, child, player, cfreach, player_reach, net, bucket_cache,
         );
         return;
     }
 
     if node.is_chance() && node.turn() == NOT_DEALT {
-        bucketed_predict_turn_cfv(result, game, node, player, cfreach, net, bucket_cache);
+        bucketed_predict_turn_cfv(result, game, node, player, cfreach, player_reach, net, bucket_cache);
         return;
     }
 
@@ -1131,6 +1145,7 @@ fn compute_best_cfv_recursive_bucketed(
                 &node.play(action),
                 player,
                 &cfreach_updated,
+                player_reach,
                 net,
                 bucket_cache,
             )
@@ -1162,6 +1177,7 @@ fn compute_best_cfv_recursive_bucketed(
             r.write(v as f32);
         });
     } else if node.player() == player {
+        // Best response: explore all actions, player_reach passes through unchanged
         for_each_child(node, |action| {
             compute_best_cfv_recursive_bucketed(
                 row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
@@ -1169,6 +1185,7 @@ fn compute_best_cfv_recursive_bucketed(
                 &node.play(action),
                 player,
                 cfreach,
+                player_reach,
                 net,
                 bucket_cache,
             )
@@ -1205,6 +1222,7 @@ fn compute_best_cfv_recursive_bucketed(
                 &node.play(action),
                 player,
                 row(&cfreach_actions, action, row_size),
+                player_reach,
                 net,
                 bucket_cache,
             );
