@@ -97,29 +97,12 @@ fn write_npy_raw(path: &str, header: &str, data: &[f32]) -> std::io::Result<()> 
 // ---------------------------------------------------------------------------
 
 fn build_bet_sizes() -> ([BetSizeOptions; 2], [BetSizeOptions; 2]) {
-    let oop_turn: BetSizeOptions =
-        ("22%,33%,55%,66%,75%,85%,125%,150%,200%", "33%,50%,75%,100%")
-            .try_into()
-            .unwrap();
-    let ip_turn: BetSizeOptions =
-        ("22%,33%,55%,66%,75%,85%,125%,150%,200%", "33%,50%,75%,100%")
-            .try_into()
-            .unwrap();
-    let oop_river: BetSizeOptions =
-        ("22%,33%,55%,66%,75%,85%,125%,150%,200%", "33%,50%,75%,100%")
-            .try_into()
-            .unwrap();
-    let ip_river: BetSizeOptions =
-        ("22%,33%,55%,66%,75%,85%,125%,150%,200%", "33%,50%,75%,100%")
-            .try_into()
-            .unwrap();
+    // Pot-size bet + all-in only (matches DeepStack paper)
+    let oop_turn: BetSizeOptions = ("100%,a", "a").try_into().unwrap();
+    let ip_turn: BetSizeOptions = ("100%,a", "a").try_into().unwrap();
+    let oop_river: BetSizeOptions = ("100%,a", "a").try_into().unwrap();
+    let ip_river: BetSizeOptions = ("100%,a", "a").try_into().unwrap();
     ([oop_turn, ip_turn], [oop_river, ip_river])
-}
-
-fn build_donk_sizes() -> (DonkSizeOptions, DonkSizeOptions) {
-    let turn_donk: DonkSizeOptions = "15%,33%,55%,75%,100%".try_into().unwrap();
-    let river_donk: DonkSizeOptions = "15%,33%,55%,75%,100%".try_into().unwrap();
-    (turn_donk, river_donk)
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +186,6 @@ fn process_sample(
     target_exploit: f32,
     turn_bet_sizes: &[BetSizeOptions; 2],
     river_bet_sizes: &[BetSizeOptions; 2],
-    turn_donk: &DonkSizeOptions,
-    river_donk: &DonkSizeOptions,
 ) -> Option<RawSampleResult> {
     let sample_start = Instant::now();
     let board = [flop[0], flop[1], flop[2], turn_card];
@@ -238,10 +219,10 @@ fn process_sample(
         effective_stack: stack,
         turn_bet_sizes: turn_bet_sizes.clone(),
         river_bet_sizes: river_bet_sizes.clone(),
-        turn_donk_sizes: Some(turn_donk.clone()),
-        river_donk_sizes: Some(river_donk.clone()),
+        turn_donk_sizes: None,
+        river_donk_sizes: None,
         add_allin_threshold: 6.0,
-        force_allin_threshold: 0.50,
+        force_allin_threshold: 0.5,
         merging_threshold: 0.1,
         ..Default::default()
     };
@@ -391,7 +372,6 @@ fn main() {
     eprintln!();
 
     let (turn_bet_sizes, river_bet_sizes) = build_bet_sizes();
-    let (turn_donk, river_donk) = build_donk_sizes();
 
     let start = Instant::now();
     let completed = AtomicUsize::new(0);
@@ -432,8 +412,6 @@ fn main() {
                 target_exploit,
                 &turn_bet_sizes,
                 &river_bet_sizes,
-                &turn_donk,
-                &river_donk,
             );
 
             if result.is_some() {
