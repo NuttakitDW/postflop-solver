@@ -71,6 +71,7 @@ mod interface;
 mod mutex_like;
 mod range;
 mod sliceop;
+mod flop_game;
 mod solver;
 mod utility;
 
@@ -85,5 +86,6 @@ pub use game::*;
 pub use interface::*;
 pub use mutex_like::*;
 pub use range::*;
+pub use flop_game::*;
 pub use solver::*;
 pub use utility::*;

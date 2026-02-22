@@ -41,7 +41,7 @@
     "useCompression": true
   },
   "output": {
-    "filename": "data/out/20bb.flop",
+    "filename": "data/out/20bb_flopgame.flop",
     "compressionLevel": 10,
     "memo": "20bb"
   }
