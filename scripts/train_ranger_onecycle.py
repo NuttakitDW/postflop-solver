@@ -103,7 +103,12 @@ def save_loss_plot(train_hist, test_hist):
 # -------- training ----------
 def main():
     torch.manual_seed(RNG_SEED); np.random.seed(RNG_SEED)
-    dev=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.backends.mps.is_available():
+        dev=torch.device("mps")
+    elif torch.cuda.is_available():
+        dev=torch.device("cuda")
+    else:
+        dev=torch.device("cpu")
     print("Device:",dev)
 
     # load --------------------------------------------------------------
