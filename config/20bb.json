@@ -11,18 +11,18 @@
   "betSizes": {
     "oopFlopBet": "66",
     "oopFlopRaise": "66",
-    "oopTurnBet": "66",
-    "oopTurnRaise": "66",
-    "oopTurnDonk": "66",
-    "oopRiverBet": "66",
-    "oopRiverRaise": "66",
-    "oopRiverDonk": "66",
+    "oopTurnBet": "100, a",
+    "oopTurnRaise": "100, a",
+    "oopTurnDonk": "",
+    "oopRiverBet": "100, a",
+    "oopRiverRaise": "100, a",
+    "oopRiverDonk": "",
     "ipFlopBet": "66",
     "ipFlopRaise": "66",
-    "ipTurnBet": "66",
-    "ipTurnRaise": "66",
-    "ipRiverBet": "66",
-    "ipRiverRaise": "66"
+    "ipTurnBet": "100, a",
+    "ipTurnRaise": "100, a",
+    "ipRiverBet": "100, a",
+    "ipRiverRaise": "100, a"
   },
   "tree": {
     "startingPot": 55,
@@ -31,7 +31,7 @@
     "rakeCap": 0.0,
     "donkOption": 0,
     "addAllInThreshold": 600,
-    "forceAllInThreshold": 50,
+    "forceAllInThreshold": 100,
     "mergingThreshold": 10,
     "maxRaisesPerStreet": 4
   },
@@ -41,7 +41,7 @@
     "useCompression": true
   },
   "output": {
-    "filename": "data/out/20bb_flopgame.flop",
+    "filename": "data/out/standard.flop",
     "compressionLevel": 10,
     "memo": "20bb"
   }
