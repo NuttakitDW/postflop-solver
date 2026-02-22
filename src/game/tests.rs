@@ -865,3 +865,70 @@ fn solve_pio_preset_raked() {
     assert!((root_ev_ip - 66.98).abs() < 0.2);
 }
 
+#[test]
+fn with_nn_matches_standard() {
+    // Use a small flop game with simple bet sizes for fast execution
+    let card_config = CardConfig {
+        range: [
+            "AA,KK,QQ,JJ,TT,99,AKs,AQs,AJs,KQs".parse().unwrap(),
+            "AA,KK,QQ,JJ,TT,99,AKs,AQs,AJs,KQs".parse().unwrap(),
+        ],
+        flop: flop_from_str("Td9d6h").unwrap(),
+        ..Default::default()
+    };
+
+    let tree_config = TreeConfig {
+        starting_pot: 55,
+        effective_stack: 180,
+        flop_bet_sizes: [
+            ("50%", "").try_into().unwrap(),
+            ("50%", "").try_into().unwrap(),
+        ],
+        turn_bet_sizes: [
+            ("50%", "").try_into().unwrap(),
+            ("50%", "").try_into().unwrap(),
+        ],
+        river_bet_sizes: [
+            ("50%", "").try_into().unwrap(),
+            ("50%", "").try_into().unwrap(),
+        ],
+        ..Default::default()
+    };
+
+    let num_iterations = 200;
+    let target = 55.0 * 0.005; // 0.5% of pot
+
+    // --- Standard solve ---
+    let action_tree = ActionTree::new(tree_config.clone()).unwrap();
+    let mut game_std = PostFlopGame::with_config(card_config.clone(), action_tree).unwrap();
+    game_std.allocate_memory(false);
+    let exploitability_std = solve(&mut game_std, num_iterations, target, false);
+
+    // --- Deepstack solve ---
+    let action_tree = ActionTree::new(tree_config).unwrap();
+    let mut game_ds = PostFlopGame::with_config(card_config, action_tree).unwrap();
+    game_ds.allocate_memory(false);
+    let exploitability_ds = solve_with_nn(&mut game_ds, num_iterations, target, false);
+
+    // Should be bit-exact since player_reach is carried but unused
+    let diff = (exploitability_std - exploitability_ds).abs();
+    assert!(
+        diff < 1e-6,
+        "exploitability mismatch: standard={exploitability_std}, with_nn={exploitability_ds}, diff={diff}"
+    );
+
+    // Also verify EVs match
+    game_std.cache_normalized_weights();
+    game_ds.cache_normalized_weights();
+    let weights_oop = game_std.normalized_weights(0);
+    let ev_std_oop = compute_average(&game_std.expected_values(0), weights_oop);
+    let weights_oop_ds = game_ds.normalized_weights(0);
+    let ev_ds_oop = compute_average(&game_ds.expected_values(0), weights_oop_ds);
+
+    let ev_diff = (ev_std_oop - ev_ds_oop).abs();
+    assert!(
+        ev_diff < 1e-4,
+        "EV mismatch: standard={ev_std_oop}, with_nn={ev_ds_oop}, diff={ev_diff}"
+    );
+}
+
