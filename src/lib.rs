@@ -73,6 +73,7 @@ mod range;
 mod sliceop;
 mod flop_game;
 mod solver;
+mod turn_cfv;
 mod utility;
 
 #[cfg(feature = "bincode")]
@@ -88,4 +89,5 @@ pub use mutex_like::*;
 pub use range::*;
 pub use flop_game::*;
 pub use solver::*;
+pub use turn_cfv::*;
 pub use utility::*;

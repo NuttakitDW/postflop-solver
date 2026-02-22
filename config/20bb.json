@@ -41,7 +41,7 @@
     "useCompression": true
   },
   "output": {
-    "filename": "data/out/standard.flop",
+    "filename": "data/out/cfv.flop",
     "compressionLevel": 10,
     "memo": "20bb"
   }
