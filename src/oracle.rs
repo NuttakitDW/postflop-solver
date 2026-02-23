@@ -9,6 +9,8 @@
 
 use crate::action_tree::*;
 use crate::card::*;
+use crate::game::PostFlopGame;
+use crate::game::PostFlopNode;
 use crate::interface::*;
 use crate::mutex_like::*;
 use crate::range::Range;
@@ -906,6 +908,293 @@ fn solve_recursive(
                 game, &mut node.play(action), player,
                 row(&cfreach_actions, action, row_size),
                 player_reach, params,
+            );
+        });
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_uninit(result, &cfv_actions);
+    }
+}
+
+// ============================================================================
+// Solve PostFlopGame with oracle at turn boundary
+// ============================================================================
+
+/// Context for solving a PostFlopGame using an oracle at turn chance nodes.
+pub struct OracleContext {
+    oracle: OracleLookupTable,
+    /// flop_to_turn[card][player][flop_idx] = turn_idx (usize::MAX if blocked)
+    flop_to_turn: Vec<Option<[Vec<usize>; 2]>>,
+    num_turn_cards: usize,
+}
+
+impl OracleContext {
+    /// Creates an OracleContext from a PostFlopGame and an OracleLookupTable.
+    pub fn new(game: &PostFlopGame, oracle: OracleLookupTable) -> Self {
+        let flop = [
+            game.card_config().flop[0],
+            game.card_config().flop[1],
+            game.card_config().flop[2],
+        ];
+        let board_mask: u64 = (1u64 << flop[0]) | (1u64 << flop[1]) | (1u64 << flop[2]);
+
+        let mut flop_to_turn: Vec<Option<[Vec<usize>; 2]>> = Vec::with_capacity(52);
+        let mut num_turn_cards = 0usize;
+        for card in 0u8..52 {
+            if board_mask & (1u64 << card) != 0 {
+                flop_to_turn.push(None);
+                continue;
+            }
+            num_turn_cards += 1;
+            let mut mappings: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+            for player in 0..2 {
+                let private_cards = game.private_cards(player);
+                let mut turn_idx = 0usize;
+                for &(c1, c2) in private_cards {
+                    if c1 == card || c2 == card {
+                        mappings[player].push(usize::MAX);
+                    } else {
+                        mappings[player].push(turn_idx);
+                        turn_idx += 1;
+                    }
+                }
+            }
+            flop_to_turn.push(Some(mappings));
+        }
+
+        Self { oracle, flop_to_turn, num_turn_cards }
+    }
+
+    /// Evaluate turn boundary using the oracle. Returns CFVs in flop hand indexing.
+    fn evaluate_turn_boundary(
+        &self,
+        result: &mut [MaybeUninit<f32>],
+        amount: i32,
+        player: usize,
+        cfreach: &[f32],
+    ) {
+        result.iter_mut().for_each(|r| { r.write(0.0); });
+        let result_f32 = unsafe { &mut *(result as *mut [MaybeUninit<f32>] as *mut [f32]) };
+
+        let opponent = player ^ 1;
+
+        for card in 0u8..52 {
+            let mapping = match &self.flop_to_turn[card as usize] {
+                Some(m) => m,
+                None => continue,
+            };
+
+            let matrix = match self.oracle.get(amount, card) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Map cfreach from flop indexing to turn indexing
+            let num_turn_hands_opp = matrix.num_private_hands(opponent);
+            let mut turn_cfreach = vec![0.0f32; num_turn_hands_opp];
+            for (flop_idx, &turn_idx) in mapping[opponent].iter().enumerate() {
+                if turn_idx != usize::MAX {
+                    turn_cfreach[turn_idx] = cfreach[flop_idx];
+                }
+            }
+
+            // Matrix-vector multiply
+            let turn_cfvs = matrix.evaluate(player, &turn_cfreach);
+
+            // Map back to flop indexing
+            for (flop_idx, &turn_idx) in mapping[player].iter().enumerate() {
+                if turn_idx != usize::MAX {
+                    result_f32[flop_idx] += turn_cfvs[turn_idx];
+                }
+            }
+        }
+
+        let scale = 1.0 / self.num_turn_cards as f32;
+        for v in result_f32.iter_mut() {
+            *v *= scale;
+        }
+    }
+}
+
+/// Solves a PostFlopGame using the oracle at turn chance nodes.
+///
+/// The solver writes strategies directly into PostFlopGame's nodes.
+/// Flop strategies are solved via DCFR; turn/river nodes are left untouched.
+///
+/// Note: `compute_exploitability` measures the full tree (including uniform
+/// turn/river), so it cannot be used as a stopping criterion here. Instead,
+/// we run a fixed number of iterations with convergence mode kicking in
+/// at a configurable point.
+pub fn solve_with_oracle(
+    game: &mut PostFlopGame,
+    oracle_ctx: &OracleContext,
+    max_iterations: u32,
+    _target_exploitability: f32,
+    print_progress: bool,
+) -> f32 {
+    if game.is_solved() {
+        panic!("Already solved");
+    }
+
+    let mut root = game.root();
+    let mut convergence_mode = false;
+
+    if print_progress {
+        print!("iteration: 0 / {max_iterations}");
+        io::stdout().flush().unwrap();
+    }
+
+    for t in 0..max_iterations {
+        // Enter convergence mode after ~30% of iterations
+        if t as f64 > max_iterations as f64 * 0.3 {
+            convergence_mode = true;
+        }
+
+        let params = DiscountParams::new(t, convergence_mode);
+
+        for player in 0..2 {
+            let mut result = Vec::with_capacity(game.num_private_hands(player));
+            solve_recursive_oracle(
+                result.spare_capacity_mut(),
+                game, oracle_ctx, &mut root, player,
+                game.initial_weights(player ^ 1),
+                &params,
+            );
+        }
+
+        if print_progress {
+            print!("\riteration: {} / {}", t + 1, max_iterations);
+            io::stdout().flush().unwrap();
+        }
+    }
+
+    if print_progress {
+        println!();
+    }
+
+    finalize(game);
+    0.0
+}
+
+fn solve_recursive_oracle(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    oracle_ctx: &OracleContext,
+    node: &mut PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    params: &DiscountParams,
+) {
+    // Terminal node: use PostFlopGame's evaluate
+    if node.is_terminal() {
+        game.evaluate(result, node, player, cfreach);
+        return;
+    }
+
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+
+    // Turn chance node: use oracle instead of recursing into turn/river
+    if node.is_chance() && node.turn() == NOT_DEALT {
+        oracle_ctx.evaluate_turn_boundary(result, node.amount(), player, cfreach);
+        return;
+    }
+
+    // Pass-through for single action (non-chance)
+    if num_actions == 1 && !node.is_chance() {
+        let child = &mut node.play(0);
+        solve_recursive_oracle(result, game, oracle_ctx, child, player, cfreach, params);
+        return;
+    }
+
+    let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+    // Chance node (river — not turn, since turn was handled above)
+    if node.is_chance() {
+        let chance_factor = game.chance_factor(node);
+        let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+        mul_slice_scalar_uninit(
+            cfreach_updated.spare_capacity_mut(),
+            cfreach,
+            1.0 / chance_factor as f32,
+        );
+        unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+        for_each_child(node, |action| {
+            solve_recursive_oracle(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game, oracle_ctx, &mut node.play(action), player,
+                &cfreach_updated, params,
+            );
+        });
+
+        let mut result_f64 = Vec::with_capacity(num_hands);
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+        unsafe { result_f64.set_len(num_hands) };
+
+        let isomorphic_chances = game.isomorphic_chances(node);
+        for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+            let swap_list = &game.isomorphic_swap(node, i)[player];
+            let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+            apply_swap(tmp, swap_list);
+            result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                *r += v as f64;
+            });
+            apply_swap(tmp, swap_list);
+        }
+
+        result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+            r.write(v as f32);
+        });
+    }
+    // Current player's node
+    else if node.player() == player {
+        let strategy = regret_matching(node.regrets(), num_actions);
+
+        for_each_child(node, |action| {
+            solve_recursive_oracle(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game, oracle_ctx, &mut node.play(action), player,
+                cfreach, params,
+            );
+        });
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+
+        let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+        let gamma = params.gamma_t;
+        node.strategy_mut().iter_mut().zip(&strategy).for_each(|(x, y)| {
+            *x = *x * gamma + *y;
+        });
+
+        let (alpha, beta) = (params.alpha_t, params.beta_t);
+        let cum_regret = node.regrets_mut();
+        cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y)| {
+            let coef = if x.is_sign_positive() { alpha } else { beta };
+            *x = *x * coef + *y;
+        });
+        cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
+            sub_slice(row, result);
+        });
+    }
+    // Opponent's node
+    else {
+        let mut cfreach_actions = regret_matching(node.regrets(), num_actions);
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        for_each_child(node, |action| {
+            solve_recursive_oracle(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game, oracle_ctx, &mut node.play(action), player,
+                row(&cfreach_actions, action, row_size), params,
             );
         });
 

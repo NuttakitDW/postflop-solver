@@ -241,6 +241,12 @@ impl PostFlopNode {
         }
     }
 
+    /// Returns the amount (total bet per player) at this node.
+    #[inline]
+    pub fn amount(&self) -> i32 {
+        self.amount
+    }
+
     /// Returns the turn card at this node, or `NOT_DEALT` if the turn hasn't been dealt yet.
     #[inline]
     pub fn turn(&self) -> Card {

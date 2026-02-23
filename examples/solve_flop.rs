@@ -1,10 +1,11 @@
 //! Load an `.oracle` file and solve the flop only.
 //!
-//! Uses the precomputed OracleLookupTable as boundary CFVs — no turn/river
-//! solving at runtime. Produces flop strategies via DCFR.
+//! Uses the precomputed OracleLookupTable at turn chance nodes — no turn/river
+//! solving at runtime. Strategies are written directly into PostFlopGame,
+//! then saved to a `.flop` file.
 //!
 //! Usage:
-//!   cargo run --example solve_flop --release --features "bincode rayon" -- config/template.json
+//!   cargo run --example solve_flop --release --features "bincode rayon zstd" -- config/template.json
 //!
 //! Requires:
 //!   Run `build_oracle` first to create the `.oracle` file.
@@ -14,7 +15,8 @@ mod common;
 use common::*;
 use postflop_solver::*;
 use std::env;
-use std::mem::MaybeUninit;
+use std::fs;
+use std::path::Path;
 use std::time::Instant;
 
 fn main() {
@@ -31,10 +33,11 @@ fn main() {
     let target_exploitability =
         tree_config.starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
 
-    // Load oracle
-    let oracle_path = config.output.filename.replace(".flop", ".oracle");
     println!("=== Solve Flop ===");
     println!("Board: {}", config.board.flop);
+
+    // Load oracle
+    let oracle_path = config.output.filename.replace(".flop", ".oracle");
     println!("Loading oracle: {}", oracle_path);
 
     let load_start = Instant::now();
@@ -43,17 +46,20 @@ fn main() {
     let load_time = load_start.elapsed().as_secs_f64();
     println!("Loaded: {} entries ({:.2}s)", oracle.num_entries(), load_time);
 
-    // Build flop-only game
+    // Build PostFlopGame (full tree)
     let action_tree = ActionTree::new(tree_config.clone()).unwrap();
-    let mut game = FlopSolver::new(card_config, action_tree).unwrap();
-    game.set_oracle(oracle);
-    println!("FlopSolver: {} nodes", game.num_nodes());
-    println!();
+    let mut game = PostFlopGame::with_config(card_config.clone(), action_tree).unwrap();
+    game.allocate_memory(false);
 
-    // Solve
+    // Create oracle context (flop→turn hand mappings)
+    let oracle_ctx = OracleContext::new(&game, oracle);
+
+    // Solve: DCFR on flop nodes, oracle at turn chance nodes
+    println!();
     let solve_start = Instant::now();
-    let exploitability = solve_flop(
+    let exploitability = solve_with_oracle(
         &mut game,
+        &oracle_ctx,
         config.solver.max_iterations,
         target_exploitability,
         true,
@@ -65,23 +71,15 @@ fn main() {
     println!("Exploitability: {:.4} ({:.3}% of pot)", exploitability, exploitability_pct);
     println!("Solve time: {:.2}s", solve_time);
 
-    // Print root CFVs
-    println!();
-    println!("--- Root CFVs ---");
-    for player in 0..2 {
-        let pname = if player == 0 { "OOP" } else { "IP" };
-        let num_hands = game.num_private_hands(player);
-        let cfreach = game.initial_weights(player ^ 1).to_vec();
-        let mut result = vec![MaybeUninit::<f32>::uninit(); num_hands];
-        {
-            let mut root = game.root();
-            compute_cfvalue_recursive(&mut result, &game, &mut root, player, &cfreach, false);
-        }
-        let cfvs: Vec<f32> = result.iter().map(|v| unsafe { v.assume_init() }).collect();
-        let weighted_sum: f64 = cfvs.iter().zip(game.initial_weights(player))
-            .map(|(&v, &w)| v as f64 * w as f64).sum();
-        println!("  {} ({} hands): weighted_sum={:.6}", pname, num_hands, weighted_sum);
+    // Save .flop — strategies are already in PostFlopGame's nodes
+    let output_path = &config.output.filename;
+    if let Some(parent) = Path::new(output_path).parent() {
+        fs::create_dir_all(parent).ok();
     }
+    let memo = config.output.memo.as_deref().unwrap_or("solve_flop");
+    save_data_to_file(&game, memo, output_path, config.output.compression_level)
+        .expect("Failed to save .flop file");
+    println!("Saved .flop: {}", output_path);
 
     println!();
     println!("Total time: {:.2}s (load {:.2}s + solve {:.2}s)",

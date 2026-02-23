@@ -42,7 +42,7 @@
   },
   "output": {
     "filename": "data/out/oracle.flop",
-    "compressionLevel": 10,
+    "compressionLevel": null,
     "memo": "20bb"
   }
 }
