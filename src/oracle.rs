@@ -987,13 +987,18 @@ impl OracleContext {
     }
 
     /// Evaluate turn boundary using the oracle. Returns CFVs in flop hand indexing.
-    fn evaluate_turn_boundary(
+    pub fn evaluate_turn_boundary(
         &self,
         result: &mut [MaybeUninit<f32>],
         amount: i32,
         player: usize,
         cfreach: &[f32],
     ) {
+        // Debug: log inputs
+        // eprintln!(
+        //     "[oracle-input] player={} amount={} | cfreach={:?}",
+        //     player, amount, cfreach
+        // );
         result.iter_mut().for_each(|r| { r.write(0.0); });
         let result_f32 = unsafe { &mut *(result as *mut [MaybeUninit<f32>] as *mut [f32]) };
 
@@ -1034,6 +1039,12 @@ impl OracleContext {
         for v in result_f32.iter_mut() {
             *v *= scale;
         }
+
+        // Debug: log full CFV array
+        // eprintln!(
+        //     "[oracle] player={} amount={} | cfv={:?}",
+        //     player, amount, result_f32
+        // );
     }
 }
 
@@ -1058,7 +1069,6 @@ pub fn solve_with_oracle(
     }
 
     let mut root = game.root();
-    let mut convergence_mode = false;
 
     if print_progress {
         print!("iteration: 0 / {max_iterations}");
@@ -1066,12 +1076,9 @@ pub fn solve_with_oracle(
     }
 
     for t in 0..max_iterations {
-        // Enter convergence mode after ~30% of iterations
-        if t as f64 > max_iterations as f64 * 0.3 {
-            convergence_mode = true;
-        }
-
-        let params = DiscountParams::new(t, convergence_mode);
+        // No convergence mode — we can't compute exploitability without
+        // the full tree, so just use standard DCFR discounting throughout.
+        let params = DiscountParams::new(t, false);
 
         for player in 0..2 {
             let mut result = Vec::with_capacity(game.num_private_hands(player));

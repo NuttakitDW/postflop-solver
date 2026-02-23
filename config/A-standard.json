@@ -41,7 +41,7 @@
     "useCompression": true
   },
   "output": {
-    "filename": "data/out/AdKc2d-standard.flop",
+    "filename": "data/out/AdKc2d-standard-no-converge.flop",
     "compressionLevel": null,
     "memo": "20bb"
   }

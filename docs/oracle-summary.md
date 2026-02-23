@@ -33,7 +33,21 @@ Average across all turn cards (scale by 1/num_turn_cards)
 - `src/oracle.rs` — `OracleContext::evaluate_turn_boundary` (inference), `OracleLookupTable::build` (build)
 - `src/turn_cfv.rs` — `MatrixTurnCfv::evaluate` (matrix-vector multiply), `MatrixTurnCfv::from_exact` (build matrix from solved game)
 
-## Verified Behavior
+## Verified Correct
 - cfreach changes every iteration (confirmed via logging)
 - amount selects the matrix, cfreach is multiplied against it
-- If results are off, the issue is likely in how matrices are built (from_exact or ExactTurnCfv)
+- Oracle CFVs match freshly solved ExactTurnCfv perfectly (max_diff ~1e-6) — verified via `examples/verify_oracle.rs`
+- Config settings (pot, stack, ranges, bet sizes) identical between oracle build and standard solve
+
+## Ruled Out as Root Cause
+- **Convergence mode**: Disabled in both oracle and standard solver — results still differ
+- **Compression**: Set both to `useCompression: false` — results still differ
+- **Oracle CFV accuracy**: Precomputed matrix matches fresh solve exactly
+
+## Current Status
+- Oracle flop strategy: OOP Check ~97.8%, Bet 18 ~2.2%
+- Standard flop strategy: OOP Check 100%
+- The recursive regret update logic (`solve_recursive_oracle` vs `solve_recursive`) is identical
+- The outer loop control flow is identical (with convergence mode disabled in both)
+- The CFVs at turn boundary are correct
+- **Root cause is still unknown** — something causes different regret accumulation despite identical inputs/outputs at each node
