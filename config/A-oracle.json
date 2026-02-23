@@ -36,12 +36,12 @@
     "maxRaisesPerStreet": 4
   },
   "solver": {
-    "maxIterations": 100,
+    "maxIterations": 1000,
     "targetExploitabilityPercent": 0.3,
     "useCompression": true
   },
   "output": {
-    "filename": "data/out/AdKc2d.flop",
+    "filename": "data/out/AdKc2d-oracle.flop",
     "compressionLevel": null,
     "memo": "20bb"
   }
