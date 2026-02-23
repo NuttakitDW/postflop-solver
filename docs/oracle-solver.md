@@ -11,6 +11,8 @@ cargo run --example build_lookup_table --release --features "bincode rayon" -- c
 cargo run --example solve_with_oracle --release --features "bincode rayon" -- config/A-oracle.json
 ```
 
+
+
 Step 1 produces `config/A-oracle.toracle`. Step 2 reads it and outputs the `.flop` file specified in config.
 
 ## How It Works
@@ -59,3 +61,9 @@ In practice this is fine: DCFR converges monotonically. More iterations always g
 ## Config
 
 Uses the same JSON config as standard solves. The oracle solver reads `maxIterations` for the flop-only DCFR and writes to `output.filename`.
+
+# How CFV was produced
+  1. solve_with_oracle/main.rs:98 → oracle_solver::solve_flop_fixed_iterations()
+  2. poc_precompute/oracle_solver.rs:385 → loops iterations, calls solve_recursive_with_oracle() for each player
+  3. poc_precompute/oracle_solver.rs:435 → the recursive DCFR traversal
+  4. poc_precompute/oracle_solver.rs:454 → hits turn chance node, calls oracle.evaluate_turn_boundary() (the matrix multiply)
