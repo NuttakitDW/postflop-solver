@@ -104,15 +104,24 @@ fn main() {
     let solve_time = solve_start.elapsed().as_secs_f64();
     println!();
 
-    // Save
+    // Finalize (full-tree CFV traversal required to set is_solved flag)
+    println!("Finalizing (full-tree traversal)...");
+    let finalize_start = Instant::now();
     finalize(&mut game);
+    let finalize_time = finalize_start.elapsed().as_secs_f64();
+    println!("  Finalize: {:.2}s", finalize_time);
+
+    // Save
     let output_path = &config.output.filename;
     if let Some(parent) = Path::new(output_path).parent() {
         std::fs::create_dir_all(parent).ok();
     }
     let memo = config.output.memo.as_deref().unwrap_or("oracle");
+    let save_start = Instant::now();
     save_data_to_file(&game, memo, output_path, config.output.compression_level)
         .expect("Failed to save .flop file");
+    let save_time = save_start.elapsed().as_secs_f64();
+    println!("  Save: {:.2}s ({})", save_time, output_path);
 
     let total_time = total_start.elapsed().as_secs_f64();
 
@@ -124,6 +133,8 @@ fn main() {
     println!("Solve time: {:.2}s ({} iterations, {:.4}s/iter)",
         solve_time, config.solver.max_iterations,
         solve_time / config.solver.max_iterations as f64);
+    println!("Finalize: {:.2}s (full-tree CFV traversal)", finalize_time);
+    println!("Save: {:.2}s", save_time);
     println!("Total time: {:.2}s", total_time);
     println!("Memory: {:.2} MB", memory_mb);
     println!("OOP hands: {}, IP hands: {}", oop_h, ip_h);
