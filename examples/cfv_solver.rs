@@ -136,6 +136,12 @@ struct SolverResult {
     matrix_max_diff: f32,
     matrix_avg_diff: f64,
     total_matrix_mb: f64,
+    oracle_build_seconds: f64,
+    oracle_file_mb: f64,
+    flop_solve_seconds: f64,
+    flop_exploitability_percent: f32,
+    cfv_max_diff: [f32; 2],
+    cfv_avg_diff: [f64; 2],
     total_time_seconds: f64,
     error: Option<String>,
 }
@@ -276,6 +282,9 @@ fn create_error_result(error: String) -> SolverResult {
         boundary_amounts: Vec::new(), turn_games_compared: 0,
         oracle_comparison_seconds: 0.0, matrix_max_diff: 0.0,
         matrix_avg_diff: 0.0, total_matrix_mb: 0.0,
+        oracle_build_seconds: 0.0, oracle_file_mb: 0.0,
+        flop_solve_seconds: 0.0, flop_exploitability_percent: 0.0,
+        cfv_max_diff: [0.0; 2], cfv_avg_diff: [0.0; 2],
         total_time_seconds: 0.0, error: Some(error),
     }
 }
@@ -317,11 +326,9 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         .expect("Failed to save .flop file");
     println!("  Saved to {}", output_path);
 
-    // Root CFVs
-    println!();
-    println!("--- Standard Root CFVs ---");
+    // Compute standard root CFVs (for later comparison)
+    let mut standard_cfvs: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
     for player in 0..2 {
-        let pname = if player == 0 { "OOP" } else { "IP" };
         let num_hands = game.num_private_hands(player);
         let cfreach = game.initial_weights(player ^ 1).to_vec();
         let mut result = vec![MaybeUninit::<f32>::uninit(); num_hands];
@@ -329,10 +336,7 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
             let mut root = game.root();
             compute_cfvalue_recursive(&mut result, &game, &mut root, player, &cfreach, false);
         }
-        let cfvs: Vec<f32> = result.iter().map(|v| unsafe { v.assume_init() }).collect();
-        let weighted_sum: f64 = cfvs.iter().zip(game.initial_weights(player))
-            .map(|(&v, &w)| v as f64 * w as f64).sum();
-        println!("  {} ({} hands): weighted_sum={:.6}", pname, num_hands, weighted_sum);
+        standard_cfvs[player] = result.iter().map(|v| unsafe { v.assume_init() }).collect();
     }
 
     // Free standard game memory
@@ -429,6 +433,93 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     println!("  Matrix memory: {:.2} MB", matrix_mb);
     println!("  Comparison time: {:.2}s ({} turn games)", oracle_time, total_games);
 
+    // =========================================================================
+    // [C] Build OracleLookupTable → save → load → solve flop only
+    // =========================================================================
+    println!();
+    println!("--- Oracle Pipeline: Build → Save → Load → Solve Flop ---");
+
+    let oracle_build_start = Instant::now();
+    let oracle = OracleLookupTable::build(
+        flop,
+        &card_config.range[0], &card_config.range[1],
+        tree_config.starting_pot, tree_config.effective_stack,
+        &boundary_amounts, &bet_config,
+        config.solver.max_iterations, target_exploitability,
+        true,
+    );
+    let oracle_build_time = oracle_build_start.elapsed().as_secs_f64();
+    println!("  Oracle built: {} entries, {:.2} MB matrices, {:.2}s",
+        oracle.num_entries(), oracle.matrix_memory_bytes() as f64 / 1024.0 / 1024.0,
+        oracle_build_time);
+
+    // Save oracle to file
+    let oracle_path = config.output.filename.replace(".flop", ".oracle");
+    oracle.save(&oracle_path).expect("Failed to save oracle");
+    let oracle_file_size = fs::metadata(&oracle_path).map(|m| m.len()).unwrap_or(0);
+    let oracle_file_mb = oracle_file_size as f64 / 1024.0 / 1024.0;
+    println!("  Saved to {} ({:.2} MB)", oracle_path, oracle_file_mb);
+
+    // Load oracle from file
+    let loaded_oracle = OracleLookupTable::load(&oracle_path).expect("Failed to load oracle");
+    println!("  Loaded oracle: {} entries", loaded_oracle.num_entries());
+
+    // Build flop-only game
+    let action_tree = ActionTree::new(tree_config.clone()).unwrap();
+    let mut flop_game = FlopSolver::new(card_config.clone(), action_tree).unwrap();
+    flop_game.set_oracle(loaded_oracle);
+    println!("  FlopSolver: {} nodes", flop_game.num_nodes());
+
+    // Solve flop only
+    let flop_start = Instant::now();
+    let flop_exploitability = solve_flop(
+        &mut flop_game,
+        config.solver.max_iterations,
+        target_exploitability,
+        true,
+    );
+    let flop_time = flop_start.elapsed().as_secs_f64();
+    let flop_exploitability_percent = flop_exploitability / tree_config.starting_pot as f32 * 100.0;
+    println!("  Flop exploitability: {:.4} ({:.3}% of pot)", flop_exploitability, flop_exploitability_percent);
+    println!("  Flop solve time: {:.2}s", flop_time);
+
+    // Compare root CFVs: standard vs flop-only
+    println!();
+    println!("--- Root CFV Comparison: Standard vs Flop-Only ---");
+    let mut cfv_max_diff = [0.0f32; 2];
+    let mut cfv_avg_diff = [0.0f64; 2];
+    for player in 0..2 {
+        let pname = if player == 0 { "OOP" } else { "IP" };
+        let num_hands = flop_game.num_private_hands(player);
+        let cfreach = flop_game.initial_weights(player ^ 1).to_vec();
+        let mut result = vec![MaybeUninit::<f32>::uninit(); num_hands];
+        {
+            let mut root = flop_game.root();
+            compute_cfvalue_recursive(&mut result, &flop_game, &mut root, player, &cfreach, false);
+        }
+        let flop_cfvs: Vec<f32> = result.iter().map(|v| unsafe { v.assume_init() }).collect();
+
+        let mut max_d = 0.0f32;
+        let mut total_d = 0.0f64;
+        for (a, b) in standard_cfvs[player].iter().zip(&flop_cfvs) {
+            let diff = (a - b).abs();
+            max_d = max_d.max(diff);
+            total_d += diff as f64;
+        }
+        let avg_d = if num_hands > 0 { total_d / num_hands as f64 } else { 0.0 };
+        cfv_max_diff[player] = max_d;
+        cfv_avg_diff[player] = avg_d;
+
+        let std_weighted: f64 = standard_cfvs[player].iter().zip(flop_game.initial_weights(player))
+            .map(|(&v, &w)| v as f64 * w as f64).sum();
+        let flop_weighted: f64 = flop_cfvs.iter().zip(flop_game.initial_weights(player))
+            .map(|(&v, &w)| v as f64 * w as f64).sum();
+        println!("  {} ({} hands): max_diff={:.6}, avg_diff={:.8}",
+            pname, num_hands, max_d, avg_d);
+        println!("    Standard weighted_sum={:.6}, Flop weighted_sum={:.6}, delta={:.6}",
+            std_weighted, flop_weighted, (std_weighted - flop_weighted).abs());
+    }
+
     SolverResult {
         success: true,
         standard_solve_seconds: std_time,
@@ -440,6 +531,12 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         matrix_max_diff: global_max_diff,
         matrix_avg_diff: global_avg_diff,
         total_matrix_mb: matrix_mb,
+        oracle_build_seconds: oracle_build_time,
+        oracle_file_mb,
+        flop_solve_seconds: flop_time,
+        flop_exploitability_percent,
+        cfv_max_diff,
+        cfv_avg_diff,
         total_time_seconds: total_start.elapsed().as_secs_f64(),
         error: None,
     }
@@ -493,10 +590,16 @@ fn main() {
         println!("=== Summary ===");
         println!("Standard solve: {:.2}s (exploitability {:.3}%)",
             result.standard_solve_seconds, result.standard_exploitability_percent);
-        println!("Oracle comparison: {:.2}s ({} turn games, {:.2} MB matrices)",
-            result.oracle_comparison_seconds, result.turn_games_compared, result.total_matrix_mb);
-        println!("Matrix vs Exact: max_diff={:.8}, avg_diff={:.8}",
-            result.matrix_max_diff, result.matrix_avg_diff);
+        println!("Matrix vs Exact: max_diff={:.8}, avg_diff={:.8} ({} turn games, {:.2} MB)",
+            result.matrix_max_diff, result.matrix_avg_diff,
+            result.turn_games_compared, result.total_matrix_mb);
+        println!("Oracle build: {:.2}s, file: {:.2} MB",
+            result.oracle_build_seconds, result.oracle_file_mb);
+        println!("Flop-only solve: {:.2}s (exploitability {:.3}%)",
+            result.flop_solve_seconds, result.flop_exploitability_percent);
+        println!("Root CFV diff (std vs flop): OOP max={:.6} avg={:.8}, IP max={:.6} avg={:.8}",
+            result.cfv_max_diff[0], result.cfv_avg_diff[0],
+            result.cfv_max_diff[1], result.cfv_avg_diff[1]);
         println!("Total: {:.2}s", result.total_time_seconds);
     } else {
         eprintln!();

@@ -20,6 +20,9 @@ use crate::solver::solve;
 use crate::utility::compute_cfvalue_recursive;
 use std::mem::MaybeUninit;
 
+#[cfg(feature = "bincode")]
+use bincode::{Decode, Encode};
+
 /// Bet size configuration for turn/river subtrees.
 #[derive(Clone)]
 pub struct TurnBetConfig {
@@ -66,6 +69,7 @@ pub struct ExactTurnCfv {
 ///   `CFV[i] = Σ_j matrix[p][i * num_opp_hands + j] * cfreach[j]`
 ///
 /// This is the stepping stone between ExactTurnCfv and a neural network.
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 pub struct MatrixTurnCfv {
     /// CFV matrices: matrices[player] is a flat row-major matrix
     /// of shape [num_hands[player] x num_hands[opponent]].
