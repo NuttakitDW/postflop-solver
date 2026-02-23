@@ -43,7 +43,7 @@
   "output": {
     "filename": "data/out/AdKc2d-standard.flop",
     "compressionLevel": null,
-    "memo": "20bb"
+    "memo": "20bb 150 iters 9000 seconds"
   }
 }
 
