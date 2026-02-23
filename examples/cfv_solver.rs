@@ -141,13 +141,18 @@ struct SolverResult {
 }
 
 // =============================================================================
-// CfvOracle: BoundaryCfv using ExactTurnCfv
+// CfvOracle: BoundaryCfv using MatrixTurnCfv (tree-free!)
 // =============================================================================
 
 struct CfvOracle {
-    evaluators_by_amount: HashMap<i32, Vec<Option<ExactTurnCfv>>>,
+    /// matrices_by_amount[amount][card] = Some(MatrixTurnCfv) — no tree, just matrices
+    matrices_by_amount: HashMap<i32, Vec<Option<MatrixTurnCfv>>>,
+    /// Flop hand index → turn hand index mapping per (card, player)
     flop_to_turn: Vec<Option<[Vec<usize>; 2]>>,
+    /// Number of valid turn cards (typically 49)
     total_turn_cards: usize,
+    /// Total matrix memory in bytes
+    total_matrix_bytes: usize,
 }
 
 impl CfvOracle {
@@ -192,17 +197,18 @@ impl CfvOracle {
             flop_to_turn.push(Some(mappings));
         }
 
-        // Pre-solve turn games for each (boundary_amount, turn_card)
+        // Pre-solve turn games, extract matrices, drop trees
         let amounts = game.boundary_amounts();
-        let mut evaluators_by_amount = HashMap::new();
+        let mut matrices_by_amount = HashMap::new();
         let total_games = amounts.len() * total_turn_cards;
         let mut games_done = 0usize;
+        let mut total_matrix_bytes = 0usize;
 
         for &amount in &amounts {
             let pot = tree_config.starting_pot + 2 * amount;
             let stack = tree_config.effective_stack - amount;
 
-            let mut card_evals: Vec<Option<ExactTurnCfv>> = (0..52).map(|_| None).collect();
+            let mut card_matrices: Vec<Option<MatrixTurnCfv>> = (0..52).map(|_| None).collect();
 
             for card in 0u8..52 {
                 if flop_mask & (1u64 << card) != 0 {
@@ -210,7 +216,9 @@ impl CfvOracle {
                 }
 
                 let actual_stack = if stack > 0 { stack } else { 1 };
-                let eval = ExactTurnCfv::new(
+
+                // MatrixTurnCfv: solves turn game, extracts matrix, drops tree
+                let matrix_eval = MatrixTurnCfv::new(
                     flop,
                     card,
                     &card_config.range[0],
@@ -223,22 +231,24 @@ impl CfvOracle {
                 )
                 .unwrap();
 
-                card_evals[card as usize] = Some(eval);
+                total_matrix_bytes += matrix_eval.matrix_memory_bytes();
+                card_matrices[card as usize] = Some(matrix_eval);
                 games_done += 1;
 
                 if games_done % 10 == 0 || games_done == total_games {
-                    eprint!("\r  Oracle: {}/{} turn games solved", games_done, total_games);
+                    eprint!("\r  Oracle: {}/{} turn games solved + extracted to matrix", games_done, total_games);
                 }
             }
 
-            evaluators_by_amount.insert(amount, card_evals);
+            matrices_by_amount.insert(amount, card_matrices);
         }
         eprintln!();
 
         Self {
-            evaluators_by_amount,
+            matrices_by_amount,
             flop_to_turn,
             total_turn_cards,
+            total_matrix_bytes,
         }
     }
 }
@@ -254,8 +264,8 @@ impl BoundaryCfv for CfvOracle {
         result.iter_mut().for_each(|r| { r.write(0.0); });
         let result_f32 = unsafe { &mut *(result as *mut [MaybeUninit<f32>] as *mut [f32]) };
 
-        let card_evals = match self.evaluators_by_amount.get(&node.amount()) {
-            Some(evals) => evals,
+        let card_matrices = match self.matrices_by_amount.get(&node.amount()) {
+            Some(m) => m,
             None => return,
         };
 
@@ -267,12 +277,13 @@ impl BoundaryCfv for CfvOracle {
                 None => continue,
             };
 
-            let eval = match &card_evals[card as usize] {
+            let matrix_eval = match &card_matrices[card as usize] {
                 Some(e) => e,
                 None => continue,
             };
 
-            let num_turn_hands_opp = eval.num_private_hands(opponent);
+            // Map cfreach from flop indexing to turn indexing
+            let num_turn_hands_opp = matrix_eval.num_private_hands(opponent);
             let mut turn_cfreach = vec![0.0f32; num_turn_hands_opp];
             for (flop_idx, &turn_idx) in mapping[opponent].iter().enumerate() {
                 if turn_idx != usize::MAX {
@@ -280,8 +291,10 @@ impl BoundaryCfv for CfvOracle {
                 }
             }
 
-            let turn_cfvs = eval.evaluate(player, &turn_cfreach);
+            // Matrix-vector multiply (no tree!)
+            let turn_cfvs = matrix_eval.evaluate(player, &turn_cfreach);
 
+            // Map CFVs back to flop indexing
             for (flop_idx, &turn_idx) in mapping[player].iter().enumerate() {
                 if turn_idx != usize::MAX {
                     result_f32[flop_idx] += turn_cfvs[turn_idx];
@@ -449,7 +462,7 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
 
     // Build FlopGame
     let action_tree = ActionTree::new(tree_config.clone()).unwrap();
-    let mut game = FlopGame::new(card_config, action_tree).unwrap();
+    let mut game = FlopGame::new(card_config.clone(), action_tree).unwrap();
 
     let oop_hands = game.num_private_hands(0);
     let ip_hands = game.num_private_hands(1);
@@ -469,7 +482,9 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     let oracle_start = Instant::now();
     let oracle = CfvOracle::new(&game, config.solver.max_iterations, target_exploitability);
     let oracle_time = oracle_start.elapsed().as_secs_f64();
+    let matrix_mb = oracle.total_matrix_bytes as f64 / 1024.0 / 1024.0;
     println!("  Oracle build time: {:.2}s", oracle_time);
+    println!("  Matrix memory: {:.2} MB (trees dropped, only matrices remain)", matrix_mb);
 
     game.set_oracle(Box::new(oracle));
 
@@ -487,9 +502,10 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
     println!("  Exploitability: {:.4} ({:.3}% of pot)", exploitability, exploitability_percent);
     println!("  Flop solve time: {:.2}s", solve_time);
 
-    // Extract and display root CFVs
+    // Extract deepstack root CFVs
     println!();
-    println!("--- Root CFVs ---");
+    println!("--- Deepstack Root CFVs (BoundaryCfv) ---");
+    let mut ds_cfvs: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
     for player in 0..2 {
         let pname = if player == 0 { "OOP" } else { "IP" };
         let num_hands = game.num_private_hands(player);
@@ -504,7 +520,79 @@ fn run_solver(config: &SolverConfig) -> SolverResult {
         let weighted_sum: f64 = cfvs.iter().zip(game.initial_weights(player))
             .map(|(&v, &w)| v as f64 * w as f64).sum();
         println!("  {} ({} hands): weighted_sum={:.6}", pname, num_hands, weighted_sum);
+        ds_cfvs[player] = cfvs;
     }
+
+    // Standard full-tree solve for comparison + .flop export
+    println!();
+    println!("--- Standard Full-Tree Solve (for comparison) ---");
+    let std_start = Instant::now();
+    let action_tree_std = ActionTree::new(tree_config.clone()).unwrap();
+    let mut game_std = PostFlopGame::with_config(card_config, action_tree_std).unwrap();
+    game_std.allocate_memory(false);
+    let std_exploitability = solve(&mut game_std, config.solver.max_iterations, target_exploitability, true);
+    let std_time = std_start.elapsed().as_secs_f64();
+    println!("  Standard exploitability: {:.4} ({:.3}% of pot)",
+        std_exploitability, std_exploitability / tree_config.starting_pot as f32 * 100.0);
+    println!("  Standard solve time: {:.2}s", std_time);
+
+    // Extract standard root CFVs
+    let mut std_cfvs: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
+    for player in 0..2 {
+        let pname = if player == 0 { "OOP" } else { "IP" };
+        let num_hands = game_std.num_private_hands(player);
+        let cfreach = game_std.initial_weights(player ^ 1).to_vec();
+        let mut result = vec![MaybeUninit::<f32>::uninit(); num_hands];
+        {
+            let mut root = game_std.root();
+            compute_cfvalue_recursive(&mut result, &game_std, &mut root, player, &cfreach, false);
+        }
+        let cfvs: Vec<f32> = result.iter().map(|v| unsafe { v.assume_init() }).collect();
+
+        let weighted_sum: f64 = cfvs.iter().zip(game_std.initial_weights(player))
+            .map(|(&v, &w)| v as f64 * w as f64).sum();
+        println!("  {} ({} hands): weighted_sum={:.6}", pname, num_hands, weighted_sum);
+        std_cfvs[player] = cfvs;
+    }
+
+    // Compare per-hand CFVs
+    println!();
+    println!("--- CFV Comparison: BoundaryCfv vs Standard ---");
+    for player in 0..2 {
+        let pname = if player == 0 { "OOP" } else { "IP" };
+        let ds = &ds_cfvs[player];
+        let st = &std_cfvs[player];
+        assert_eq!(ds.len(), st.len());
+
+        let mut max_diff = 0.0f32;
+        let mut total_diff = 0.0f64;
+        let mut max_diff_idx = 0;
+        for i in 0..ds.len() {
+            let diff = (ds[i] - st[i]).abs();
+            total_diff += diff as f64;
+            if diff > max_diff {
+                max_diff = diff;
+                max_diff_idx = i;
+            }
+        }
+        let avg_diff = total_diff / ds.len() as f64;
+        let cards = game.private_cards(player);
+        let (c1, c2) = cards[max_diff_idx];
+        println!("  {}: max_diff={:.6} (hand {}={}) avg_diff={:.6}",
+            pname, max_diff, max_diff_idx, hole_to_string((c1, c2)).unwrap(), avg_diff);
+    }
+
+    // Save standard solve to .flop
+    let output_path = &config.output.filename;
+    if let Some(parent) = Path::new(output_path).parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let memo = config.output.memo.as_deref().unwrap_or("standard");
+    let compression = config.output.compression_level;
+    save_data_to_file(&game_std, memo, output_path, compression)
+        .expect("Failed to save .flop file");
+    println!();
+    println!("  Saved standard solve to {}", output_path);
 
     SolverResult {
         success: true,

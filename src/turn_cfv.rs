@@ -56,6 +56,28 @@ pub struct ExactTurnCfv {
     game: PostFlopGame,
 }
 
+/// Tree-free turn CFV evaluator using precomputed matrices.
+///
+/// Proves that only the linear mapping (cfreach → CFVs) matters, not the tree.
+/// Built from ExactTurnCfv: probes with basis vectors to extract the matrix,
+/// then drops the tree entirely.
+///
+/// For player p with opponent o:
+///   `CFV[i] = Σ_j matrix[p][i * num_opp_hands + j] * cfreach[j]`
+///
+/// This is the stepping stone between ExactTurnCfv and a neural network.
+pub struct MatrixTurnCfv {
+    /// CFV matrices: matrices[player] is a flat row-major matrix
+    /// of shape [num_hands[player] x num_hands[opponent]].
+    matrices: [Vec<f32>; 2],
+    /// Number of private hands per player.
+    num_hands: [usize; 2],
+    /// Private card pairs per player (kept for hand mapping).
+    private_cards: [Vec<(Card, Card)>; 2],
+    /// Initial reach weights per player.
+    initial_weights: [Vec<f32>; 2],
+}
+
 impl ExactTurnCfv {
     /// Build and solve a Turn-start game.
     ///
@@ -187,6 +209,140 @@ impl ExactTurnCfv {
     /// Initial reach probabilities for the given player.
     pub fn initial_weights(&self, player: usize) -> &[f32] {
         self.game.initial_weights(player)
+    }
+}
+
+impl MatrixTurnCfv {
+    /// Build a tree-free CFV evaluator.
+    ///
+    /// Internally creates an ExactTurnCfv (solves the turn game), extracts
+    /// the CFV matrix by probing with basis vectors, then drops the tree.
+    pub fn new(
+        flop: [Card; 3],
+        turn_card: Card,
+        oop_range: &Range,
+        ip_range: &Range,
+        pot: i32,
+        stack: i32,
+        bet_config: &TurnBetConfig,
+        max_iterations: u32,
+        target_exploitability: f32,
+    ) -> Result<Self, String> {
+        // Solve the turn game (this is the only time we need the tree)
+        let exact = ExactTurnCfv::new(
+            flop,
+            turn_card,
+            oop_range,
+            ip_range,
+            pot,
+            stack,
+            bet_config,
+            max_iterations,
+            target_exploitability,
+        )?;
+
+        let num_hands = [
+            exact.num_private_hands(0),
+            exact.num_private_hands(1),
+        ];
+        let private_cards = [
+            exact.private_cards(0).to_vec(),
+            exact.private_cards(1).to_vec(),
+        ];
+        let initial_weights = [
+            exact.initial_weights(0).to_vec(),
+            exact.initial_weights(1).to_vec(),
+        ];
+
+        // Extract CFV matrices by probing with basis vectors.
+        // For player p, opponent o:
+        //   Send e_j (basis vector with 1.0 at position j) as cfreach
+        //   The result column = matrix[:, j]
+        let mut matrices = [Vec::new(), Vec::new()];
+
+        for player in 0..2 {
+            let opponent = player ^ 1;
+            let n_player = num_hands[player];
+            let n_opp = num_hands[opponent];
+            let mut matrix = vec![0.0f32; n_player * n_opp];
+
+            let mut basis = vec![0.0f32; n_opp];
+            for j in 0..n_opp {
+                // Set basis vector e_j
+                basis[j] = 1.0;
+
+                // Probe: CFVs when only opponent hand j has reach
+                let cfvs = exact.evaluate(player, &basis);
+
+                // Store as column j of the matrix
+                for i in 0..n_player {
+                    matrix[i * n_opp + j] = cfvs[i];
+                }
+
+                // Reset basis vector
+                basis[j] = 0.0;
+            }
+
+            matrices[player] = matrix;
+        }
+
+        // ExactTurnCfv (and its PostFlopGame tree) is dropped here
+        Ok(Self {
+            matrices,
+            num_hands,
+            private_cards,
+            initial_weights,
+        })
+    }
+
+    /// Compute CFVs using matrix-vector multiply (no tree).
+    ///
+    /// `CFV[i] = Σ_j matrix[i][j] * cfreach[j]`
+    pub fn evaluate(&self, player: usize, cfreach: &[f32]) -> Vec<f32> {
+        let opponent = player ^ 1;
+        let n_player = self.num_hands[player];
+        let n_opp = self.num_hands[opponent];
+        assert_eq!(
+            cfreach.len(),
+            n_opp,
+            "cfreach length {} != expected {}",
+            cfreach.len(),
+            n_opp
+        );
+
+        let matrix = &self.matrices[player];
+        let mut result = vec![0.0f32; n_player];
+
+        for i in 0..n_player {
+            let row_start = i * n_opp;
+            let mut sum = 0.0f32;
+            for j in 0..n_opp {
+                sum += matrix[row_start + j] * cfreach[j];
+            }
+            result[i] = sum;
+        }
+
+        result
+    }
+
+    /// Number of private hands for the given player.
+    pub fn num_private_hands(&self, player: usize) -> usize {
+        self.num_hands[player]
+    }
+
+    /// Private card pairs for the given player.
+    pub fn private_cards(&self, player: usize) -> &[(Card, Card)] {
+        &self.private_cards[player]
+    }
+
+    /// Initial reach probabilities for the given player.
+    pub fn initial_weights(&self, player: usize) -> &[f32] {
+        &self.initial_weights[player]
+    }
+
+    /// Memory usage of the matrices in bytes.
+    pub fn matrix_memory_bytes(&self) -> usize {
+        (self.matrices[0].len() + self.matrices[1].len()) * std::mem::size_of::<f32>()
     }
 }
 
@@ -357,6 +513,137 @@ mod tests {
         assert!(
             max_diff > 1e-6,
             "Different reaches should give different CFVs"
+        );
+    }
+
+    // =========================================================================
+    // MatrixTurnCfv tests — prove tree-free oracle matches exact
+    // =========================================================================
+
+    fn make_matrix_evaluator() -> (ExactTurnCfv, MatrixTurnCfv) {
+        let oop_range: Range = "66+,A8s+,A5s-A4s,AJo+,K9s+,KQo,QTs+,JTs,96s+,85s+,75s+,65s,54s"
+            .parse()
+            .unwrap();
+        let ip_range: Range =
+            "QQ-22,AQs-A2s,ATo+,K5s+,KJo+,Q8s+,J8s+,T7s+,96s+,86s+,75s+,64s+,53s+"
+                .parse()
+                .unwrap();
+
+        let flop = flop_from_str("Td9d6h").unwrap();
+        let turn = card_from_str("Qc").unwrap();
+        let pot = 200;
+        let stack = 900;
+        let target = pot as f32 * 0.005;
+        let config = TurnBetConfig::default();
+
+        let exact = ExactTurnCfv::new(
+            flop, turn, &oop_range, &ip_range, pot, stack, &config, 1000, target,
+        )
+        .unwrap();
+
+        let matrix = MatrixTurnCfv::new(
+            flop, turn, &oop_range, &ip_range, pot, stack, &config, 1000, target,
+        )
+        .unwrap();
+
+        (exact, matrix)
+    }
+
+    #[test]
+    fn test_matrix_matches_exact_initial_reach() {
+        let (exact, matrix) = make_matrix_evaluator();
+
+        for player in 0..2 {
+            let cfreach = exact.initial_weights(player ^ 1).to_vec();
+            let cfvs_exact = exact.evaluate(player, &cfreach);
+            let cfvs_matrix = matrix.evaluate(player, &cfreach);
+
+            assert_eq!(cfvs_exact.len(), cfvs_matrix.len());
+
+            let max_diff: f32 = cfvs_exact
+                .iter()
+                .zip(&cfvs_matrix)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+
+            assert!(
+                max_diff < 1e-4,
+                "Player {} initial reach: matrix vs exact max_diff={} (should be < 1e-4)",
+                player, max_diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_matrix_matches_exact_random_reaches() {
+        let (exact, matrix) = make_matrix_evaluator();
+
+        // Test with several different reach patterns
+        for player in 0..2 {
+            let n_opp = exact.num_private_hands(player ^ 1);
+
+            // Pattern 1: half reach
+            let mut reach_half = exact.initial_weights(player ^ 1).to_vec();
+            for i in 0..reach_half.len() / 2 {
+                reach_half[i] = 0.0;
+            }
+
+            // Pattern 2: uniform reach
+            let reach_uniform = vec![1.0f32; n_opp];
+
+            // Pattern 3: single hand
+            let mut reach_single = vec![0.0f32; n_opp];
+            reach_single[0] = 1.0;
+
+            for (name, reach) in [
+                ("half", reach_half),
+                ("uniform", reach_uniform),
+                ("single", reach_single),
+            ] {
+                let cfvs_exact = exact.evaluate(player, &reach);
+                let cfvs_matrix = matrix.evaluate(player, &reach);
+
+                let max_diff: f32 = cfvs_exact
+                    .iter()
+                    .zip(&cfvs_matrix)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+
+                assert!(
+                    max_diff < 1e-4,
+                    "Player {} reach '{}': matrix vs exact max_diff={} (should be < 1e-4)",
+                    player, name, max_diff
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_matrix_zero_sum() {
+        let matrix = make_matrix_evaluator().1;
+
+        let cfreach_oop = matrix.initial_weights(1).to_vec();
+        let cfreach_ip = matrix.initial_weights(0).to_vec();
+
+        let cfvs_oop = matrix.evaluate(0, &cfreach_oop);
+        let cfvs_ip = matrix.evaluate(1, &cfreach_ip);
+
+        let weighted_oop: f64 = cfvs_oop
+            .iter()
+            .zip(matrix.initial_weights(0))
+            .map(|(&v, &w)| v as f64 * w as f64)
+            .sum();
+        let weighted_ip: f64 = cfvs_ip
+            .iter()
+            .zip(matrix.initial_weights(1))
+            .map(|(&v, &w)| v as f64 * w as f64)
+            .sum();
+
+        let sum = weighted_oop + weighted_ip;
+        assert!(
+            sum.abs() < 1.0,
+            "MatrixTurnCfv should be zero-sum, got {}",
+            sum
         );
     }
 }
