@@ -213,6 +213,51 @@ impl ExactTurnCfv {
 }
 
 impl MatrixTurnCfv {
+    /// Extract a tree-free CFV evaluator from an existing ExactTurnCfv.
+    ///
+    /// Probes the solved game with basis vectors to extract the CFV matrix.
+    /// The ExactTurnCfv (and its tree) can be dropped after this.
+    pub fn from_exact(exact: &ExactTurnCfv) -> Self {
+        let num_hands = [
+            exact.num_private_hands(0),
+            exact.num_private_hands(1),
+        ];
+        let private_cards = [
+            exact.private_cards(0).to_vec(),
+            exact.private_cards(1).to_vec(),
+        ];
+        let initial_weights = [
+            exact.initial_weights(0).to_vec(),
+            exact.initial_weights(1).to_vec(),
+        ];
+
+        let mut matrices = [Vec::new(), Vec::new()];
+        for player in 0..2 {
+            let opponent = player ^ 1;
+            let n_player = num_hands[player];
+            let n_opp = num_hands[opponent];
+            let mut matrix = vec![0.0f32; n_player * n_opp];
+
+            let mut basis = vec![0.0f32; n_opp];
+            for j in 0..n_opp {
+                basis[j] = 1.0;
+                let cfvs = exact.evaluate(player, &basis);
+                for i in 0..n_player {
+                    matrix[i * n_opp + j] = cfvs[i];
+                }
+                basis[j] = 0.0;
+            }
+            matrices[player] = matrix;
+        }
+
+        Self {
+            matrices,
+            num_hands,
+            private_cards,
+            initial_weights,
+        }
+    }
+
     /// Build a tree-free CFV evaluator.
     ///
     /// Internally creates an ExactTurnCfv (solves the turn game), extracts

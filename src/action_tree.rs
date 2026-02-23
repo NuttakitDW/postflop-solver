@@ -386,6 +386,28 @@ impl ActionTree {
         self.total_bet_amount_recursive(&self.root.lock(), &self.history, info)
     }
 
+    /// Returns the distinct bet amounts at chance nodes (flop→turn boundary).
+    pub fn boundary_amounts(&self) -> Vec<i32> {
+        let mut amounts = Vec::new();
+        Self::collect_boundary_amounts(&self.root.lock(), &mut amounts);
+        amounts
+    }
+
+    fn collect_boundary_amounts(node: &ActionTreeNode, amounts: &mut Vec<i32>) {
+        if node.player & PLAYER_TERMINAL_FLAG != 0 {
+            return;
+        }
+        if node.player & PLAYER_CHANCE_FLAG != 0 {
+            if !amounts.contains(&node.amount) {
+                amounts.push(node.amount);
+            }
+            return;
+        }
+        for child in &node.children {
+            Self::collect_boundary_amounts(&child.lock(), amounts);
+        }
+    }
+
     /// Ejects the fields.
     #[inline]
     pub(crate) fn eject(self) -> EjectedActionTree {
