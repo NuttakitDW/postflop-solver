@@ -1,0 +1,48 @@
+{
+  "board": {
+    "flop": "Td9d6h",
+    "turn": null,
+    "river": null
+  },
+  "ranges": {
+    "oop": "AA,KK,QQ,JJ,TT,99,88,77,66,AKs,AQs,AJs,ATs,KQs,KJs,KTs,QJs,QTs,JTs,AKo,AQo,AJo,KQo",
+    "ip": "AA,KK,QQ,JJ,TT,99,88,77,66,55,44,33,22,AKs,AQs,AJs,ATs,A9s,A8s,A7s,A6s,A5s,A4s,A3s,A2s,KQs,KJs,KTs,K9s,QJs,QTs,Q9s,JTs,J9s,T9s,T8s,98s,87s,76s,65s,AKo,AQo,AJo,ATo,KQo,KJo,QJo"
+  },
+  "betSizes": {
+    "oopFlopBet": "50",
+    "oopFlopRaise": "a",
+    "oopTurnBet": "50",
+    "oopTurnRaise": "a",
+    "oopTurnDonk": "",
+    "oopRiverBet": "50",
+    "oopRiverRaise": "a",
+    "oopRiverDonk": "",
+    "ipFlopBet": "50",
+    "ipFlopRaise": "a",
+    "ipTurnBet": "50",
+    "ipTurnRaise": "a",
+    "ipRiverBet": "50",
+    "ipRiverRaise": "a"
+  },
+  "tree": {
+    "startingPot": 100,
+    "effectiveStack": 200,
+    "rakePercent": 0.0,
+    "rakeCap": 0.0,
+    "donkOption": 0,
+    "addAllInThreshold": 150,
+    "forceAllInThreshold": 15,
+    "mergingThreshold": 10,
+    "maxRaisesPerStreet": 2
+  },
+  "solver": {
+    "maxIterations": 200,
+    "targetExploitabilityPercent": 2.0,
+    "useCompression": false
+  },
+  "output": {
+    "filename": "data/out/poc.flop",
+    "compressionLevel": null,
+    "memo": "poc"
+  }
+}
