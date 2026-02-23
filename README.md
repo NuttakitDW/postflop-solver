@@ -49,3 +49,8 @@ Options:
   --input-dir <DIR>   Raw data directory (default: ./data/solver_output)
   --output-dir <DIR>  Output directory (default: ./data/training_data)
   --k <N>             Number of buckets (default: 1000)
+
+
+# Oracle Lookup Table
+cargo run --example build_oracle --release --features "bincode rayon" -- config/20bb.json 
+cargo run --example solve_flop --release --features "bincode rayon" -- config/20bb.json 
