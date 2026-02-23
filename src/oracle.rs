@@ -20,6 +20,7 @@ use crate::utility::*;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::slice;
+use std::time::Instant;
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
@@ -68,6 +69,7 @@ impl OracleLookupTable {
         let num_turn_cards = 52 - 3;
         let total_games = boundary_amounts.len() * num_turn_cards;
         let mut games_done = 0usize;
+        let build_start = Instant::now();
 
         let mut entries: Vec<Option<MatrixTurnCfv>> =
             (0..boundary_amounts.len() * 52).map(|_| None).collect();
@@ -76,6 +78,13 @@ impl OracleLookupTable {
             let pot = starting_pot + 2 * amount;
             let stack = effective_stack - amount;
             let actual_stack = if stack > 0 { stack } else { 1 };
+
+            if print_progress {
+                eprintln!("  [{}/{}] amount={} (pot={}, stack={})",
+                    amount_idx + 1, boundary_amounts.len(), amount, pot, actual_stack);
+            }
+
+            let amount_start = Instant::now();
 
             for card in 0u8..52 {
                 if flop_mask & (1u64 << card) != 0 {
@@ -92,13 +101,24 @@ impl OracleLookupTable {
                 entries[amount_idx * 52 + card as usize] = Some(matrix);
 
                 games_done += 1;
-                if print_progress && (games_done % 10 == 0 || games_done == total_games) {
-                    eprint!("\r  Oracle: {}/{} turn games", games_done, total_games);
+                if print_progress {
+                    let elapsed = build_start.elapsed().as_secs_f64();
+                    let avg = elapsed / games_done as f64;
+                    let remaining = avg * (total_games - games_done) as f64;
+                    eprint!("\r    turn cards: {}/{} | total: {}/{} | ETA: {:.0}s   ",
+                        games_done - amount_idx * num_turn_cards, num_turn_cards,
+                        games_done, total_games, remaining);
+                    io::stderr().flush().ok();
                 }
+            }
+
+            if print_progress {
+                let amount_time = amount_start.elapsed().as_secs_f64();
+                eprintln!("\r    done: {} cards in {:.1}s                              ", num_turn_cards, amount_time);
             }
         }
         if print_progress {
-            eprintln!();
+            eprintln!("  All {} turn games completed in {:.1}s", total_games, build_start.elapsed().as_secs_f64());
         }
 
         Self {

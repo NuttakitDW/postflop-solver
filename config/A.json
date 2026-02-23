@@ -9,20 +9,20 @@
     "ip": "5c4c: 0.42,5d4d: 0.42,5d5c: 0.82,5h4h: 0.42,5h5c: 0.82,5h5d: 0.82,5s4s: 0.42,5s5c: 0.82,5s5d: 0.82,5s5h: 0.82,6c5c: 0.496,6d5d: 0.496,6d6c: 0.93,6h5h: 0.496,6h6c: 0.93,6h6d: 0.93,6s5s: 0.496,6s6c: 0.93,6s6d: 0.93,6s6h: 0.93,7c5c: 0.556,7c6c: 0.666,7d5d: 0.556,7d6d: 0.666,7d7c: 0.946,7h5h: 0.556,7h6h: 0.666,7h7c: 0.946,7h7d: 0.946,7s5s: 0.556,7s6s: 0.666,7s7c: 0.946,7s7d: 0.946,7s7h: 0.946,8c5c: 0.746,8c6c: 0.61,8c7c: 0.63,8d5d: 0.746,8d6d: 0.61,8d7d: 0.63,8d8c: 0.846,8h5h: 0.746,8h6h: 0.61,8h7h: 0.63,8h8c: 0.846,8h8d: 0.846,8s5s: 0.746,8s6s: 0.61,8s7s: 0.63,8s8c: 0.846,8s8d: 0.846,8s8h: 0.846,9c6c: 0.666,9c7c: 0.8,9c8c: 0.806,9c8d: 0.4,9c8h: 0.4,9c8s: 0.4,9d6d: 0.666,9d7d: 0.8,9d8c: 0.4,9d8d: 0.806,9d8h: 0.4,9d8s: 0.4,9d9c: 0.72,9h6h: 0.666,9h7h: 0.8,9h8c: 0.4,9h8d: 0.4,9h8h: 0.806,9h8s: 0.4,9h9c: 0.72,9h9d: 0.72,9s6s: 0.666,9s7s: 0.8,9s8c: 0.4,9s8d: 0.4,9s8h: 0.4,9s8s: 0.806,9s9c: 0.72,9s9d: 0.72,9s9h: 0.72,Tc6c: 0.5,Tc7c: 0.81,Tc8c: 0.84,Tc8d: 0.3,Tc8h: 0.3,Tc8s: 0.3,Tc9c: 0.56,Tc9d: 0.7,Tc9h: 0.7,Tc9s: 0.7,Td6d: 0.5,Td7d: 0.81,Td8c: 0.3,Td8d: 0.84,Td8h: 0.3,Td8s: 0.3,Td9c: 0.7,Td9d: 0.56,Td9h: 0.7,Td9s: 0.7,TdTc: 0.73,Th6h: 0.5,Th7h: 0.81,Th8c: 0.3,Th8d: 0.3,Th8h: 0.84,Th8s: 0.3,Th9c: 0.7,Th9d: 0.7,Th9h: 0.56,Th9s: 0.7,ThTc: 0.73,ThTd: 0.73,Ts6s: 0.5,Ts7s: 0.81,Ts8c: 0.3,Ts8d: 0.3,Ts8h: 0.3,Ts8s: 0.84,Ts9c: 0.7,Ts9d: 0.7,Ts9h: 0.7,Ts9s: 0.56,TsTc: 0.73,TsTd: 0.73,TsTh: 0.73,Jc4c: 0.2,Jc5c: 0.59,Jc6c: 0.75,Jc7c: 0.91,Jc8c: 0.816,Jc8d: 0.336,Jc8h: 0.336,Jc8s: 0.336,Jc9c: 0.5,Jc9d: 0.73,Jc9h: 0.73,Jc9s: 0.73,JcTd: 0.81,JcTh: 0.81,JcTs: 0.81,Jd4d: 0.2,Jd5d: 0.59,Jd6d: 0.75,Jd7d: 0.91,Jd8c: 0.336,Jd8d: 0.816,Jd8h: 0.336,Jd8s: 0.336,Jd9c: 0.73,Jd9d: 0.5,Jd9h: 0.73,Jd9s: 0.73,JdTc: 0.81,JdTh: 0.81,JdTs: 0.81,JdJc: 0.816,Jh4h: 0.2,Jh5h: 0.59,Jh6h: 0.75,Jh7h: 0.91,Jh8c: 0.336,Jh8d: 0.336,Jh8h: 0.816,Jh8s: 0.336,Jh9c: 0.73,Jh9d: 0.73,Jh9h: 0.5,Jh9s: 0.73,JhTc: 0.81,JhTd: 0.81,JhTs: 0.81,JhJc: 0.816,JhJd: 0.816,Js4s: 0.2,Js5s: 0.59,Js6s: 0.75,Js7s: 0.91,Js8c: 0.336,Js8d: 0.336,Js8h: 0.336,Js8s: 0.816,Js9c: 0.73,Js9d: 0.73,Js9h: 0.73,Js9s: 0.5,JsTc: 0.81,JsTd: 0.81,JsTh: 0.81,JsJc: 0.816,JsJd: 0.816,JsJh: 0.816,Qc4c: 0.63,Qc5c: 0.95,Qc6c: 0.89,Qc7c: 0.75,Qc8c: 0.65,Qc8d: 0.36,Qc8h: 0.36,Qc8s: 0.36,Qc9c: 0.3,Qc9d: 0.746,Qc9h: 0.746,Qc9s: 0.746,QcTc: 0.176,QcTd: 0.756,QcTh: 0.756,QcTs: 0.756,QcJc: 1,QcJd: 0.62,QcJh: 0.62,QcJs: 0.62,Qd4d: 0.63,Qd5d: 0.95,Qd6d: 0.89,Qd7d: 0.75,Qd8c: 0.36,Qd8d: 0.65,Qd8h: 0.36,Qd8s: 0.36,Qd9c: 0.746,Qd9d: 0.3,Qd9h: 0.746,Qd9s: 0.746,QdTc: 0.756,QdTd: 0.176,QdTh: 0.756,QdTs: 0.756,QdJc: 0.62,QdJd: 1,QdJh: 0.62,QdJs: 0.62,QdQc: 0.876,Qh4h: 0.63,Qh5h: 0.95,Qh6h: 0.89,Qh7h: 0.75,Qh8c: 0.36,Qh8d: 0.36,Qh8h: 0.65,Qh8s: 0.36,Qh9c: 0.746,Qh9d: 0.746,Qh9h: 0.3,Qh9s: 0.746,QhTc: 0.756,QhTd: 0.756,QhTh: 0.176,QhTs: 0.756,QhJc: 0.62,QhJd: 0.62,QhJh: 1,QhJs: 0.62,QhQc: 0.876,QhQd: 0.876,Qs4s: 0.63,Qs5s: 0.95,Qs6s: 0.89,Qs7s: 0.75,Qs8c: 0.36,Qs8d: 0.36,Qs8h: 0.36,Qs8s: 0.65,Qs9c: 0.746,Qs9d: 0.746,Qs9h: 0.746,Qs9s: 0.3,QsTc: 0.756,QsTd: 0.756,QsTh: 0.756,QsTs: 0.176,QsJc: 0.62,QsJd: 0.62,QsJh: 0.62,QsJs: 1,QsQc: 0.876,QsQd: 0.876,QsQh: 0.876,Kd3d: 0.566,Kd4d: 0.89,Kd5d: 0.926,Kd6d: 0.686,Kd7c: 0.586,Kd7d: 0.486,Kd7h: 0.586,Kd7s: 0.586,Kd8c: 0.73,Kd8d: 0.44,Kd8h: 0.73,Kd8s: 0.73,Kd9c: 0.736,Kd9d: 0.276,Kd9h: 0.736,Kd9s: 0.736,KdTc: 0.826,KdTd: 0.346,KdTh: 0.826,KdTs: 0.826,KdJc: 0.516,KdJd: 0.916,KdJh: 0.516,KdJs: 0.516,KdQc: 0.58,KdQd: 0.84,KdQh: 0.58,KdQs: 0.58,Kh3h: 0.566,Kh4h: 0.89,Kh5h: 0.926,Kh6h: 0.686,Kh7c: 0.586,Kh7d: 0.586,Kh7h: 0.486,Kh7s: 0.586,Kh8c: 0.73,Kh8d: 0.73,Kh8h: 0.44,Kh8s: 0.73,Kh9c: 0.736,Kh9d: 0.736,Kh9h: 0.276,Kh9s: 0.736,KhTc: 0.826,KhTd: 0.826,KhTh: 0.346,KhTs: 0.826,KhJc: 0.516,KhJd: 0.516,KhJh: 0.916,KhJs: 0.516,KhQc: 0.58,KhQd: 0.58,KhQh: 0.84,KhQs: 0.58,KhKd: 0.846,Ks3s: 0.566,Ks4s: 0.89,Ks5s: 0.926,Ks6s: 0.686,Ks7c: 0.586,Ks7d: 0.586,Ks7h: 0.586,Ks7s: 0.486,Ks8c: 0.73,Ks8d: 0.73,Ks8h: 0.73,Ks8s: 0.44,Ks9c: 0.736,Ks9d: 0.736,Ks9h: 0.736,Ks9s: 0.276,KsTc: 0.826,KsTd: 0.826,KsTh: 0.826,KsTs: 0.346,KsJc: 0.516,KsJd: 0.516,KsJh: 0.516,KsJs: 0.916,KsQc: 0.58,KsQd: 0.58,KsQh: 0.58,KsQs: 0.84,KsKd: 0.846,KsKh: 0.846,Ac2h: 0.24,Ac2s: 0.24,Ac3d: 0.586,Ac3h: 0.586,Ac3s: 0.586,Ac4d: 0.67,Ac4h: 0.67,Ac4s: 0.67,Ac5c: 0.26,Ac5d: 0.72,Ac5h: 0.72,Ac5s: 0.72,Ac6c: 0.466,Ac6d: 0.946,Ac6h: 0.946,Ac6s: 0.946,Ac7c: 0.486,Ac7d: 0.306,Ac7h: 0.306,Ac7s: 0.306,Ac8c: 0.916,Ac8d: 0.09,Ac8h: 0.09,Ac8s: 0.09,Ac9c: 1,Ac9d: 0.136,Ac9h: 0.136,Ac9s: 0.136,AcTc: 0.516,AcTd: 0.8,AcTh: 0.8,AcTs: 0.8,AcJc: 0.69,AcJd: 0.78,AcJh: 0.78,AcJs: 0.78,AcQc: 0.766,AcQd: 0.786,AcQh: 0.786,AcQs: 0.786,AcKd: 0.8,AcKh: 0.8,AcKs: 0.8,Ah2c: 0.24,Ah2s: 0.24,Ah3c: 0.586,Ah3d: 0.586,Ah3s: 0.586,Ah4c: 0.67,Ah4d: 0.67,Ah4s: 0.67,Ah5c: 0.72,Ah5d: 0.72,Ah5h: 0.26,Ah5s: 0.72,Ah6c: 0.946,Ah6d: 0.946,Ah6h: 0.466,Ah6s: 0.946,Ah7c: 0.306,Ah7d: 0.306,Ah7h: 0.486,Ah7s: 0.306,Ah8c: 0.09,Ah8d: 0.09,Ah8h: 0.916,Ah8s: 0.09,Ah9c: 0.136,Ah9d: 0.136,Ah9h: 1,Ah9s: 0.136,AhTc: 0.8,AhTd: 0.8,AhTh: 0.516,AhTs: 0.8,AhJc: 0.78,AhJd: 0.78,AhJh: 0.69,AhJs: 0.78,AhQc: 0.786,AhQd: 0.786,AhQh: 0.766,AhQs: 0.786,AhKd: 0.8,AhKh: 0.96,AhKs: 0.8,AhAc: 0.826,As2c: 0.24,As2h: 0.24,As3c: 0.586,As3d: 0.586,As3h: 0.586,As4c: 0.67,As4d: 0.67,As4h: 0.67,As5c: 0.72,As5d: 0.72,As5h: 0.72,As5s: 0.26,As6c: 0.946,As6d: 0.946,As6h: 0.946,As6s: 0.466,As7c: 0.306,As7d: 0.306,As7h: 0.306,As7s: 0.486,As8c: 0.09,As8d: 0.09,As8h: 0.09,As8s: 0.916,As9c: 0.136,As9d: 0.136,As9h: 0.136,As9s: 1,AsTc: 0.8,AsTd: 0.8,AsTh: 0.8,AsTs: 0.516,AsJc: 0.78,AsJd: 0.78,AsJh: 0.78,AsJs: 0.69,AsQc: 0.786,AsQd: 0.786,AsQh: 0.786,AsQs: 0.766,AsKd: 0.8,AsKh: 0.8,AsKs: 0.96,AsAc: 0.826,AsAh: 0.826"
   },
   "betSizes": {
-    "oopFlopBet": "33, a",
-    "oopFlopRaise": "33, 55, 83, 125, a",
-    "oopTurnBet": "22, 33, 55, 66, 75, 85, 125, 150, 200, a",
-    "oopTurnRaise": "33, 50, 75, 100",
+    "oopFlopBet": "33, 66, 100, 150, a",
+    "oopFlopRaise": "50, 100, a",
+    "oopTurnBet": "33, 66, 100, 150, a",
+    "oopTurnRaise": "50, 100, a",
     "oopTurnDonk": "",
-    "oopRiverBet": "22, 33, 55, 66, 75, 85, 125, 150, 200",
-    "oopRiverRaise": "33, 50, 75, 100",
+    "oopRiverBet": "33, 66, 100, 150, a",
+    "oopRiverRaise": "50, 100, a",
     "oopRiverDonk": "",
-    "ipFlopBet": "20, 33, 55, 83, 125, a",
-    "ipFlopRaise": "33, 55, 83, 125, a",
-    "ipTurnBet": "22, 33, 55, 66, 75, 85, 125, 150, 200",
-    "ipTurnRaise": "33, 50, 75, 100",
-    "ipRiverBet": "22, 33, 55, 66, 75, 85, 125, 150, 200",
-    "ipRiverRaise": "33, 50, 75, 100"
+    "ipFlopBet": "33, 66, 100, 150, a",
+    "ipFlopRaise": "50, 100, a",
+    "ipTurnBet": "33, 66, 100, 150, a",
+    "ipTurnRaise": "50, 100, a",
+    "ipRiverBet": "33, 66, 100, 150, a",
+    "ipRiverRaise": "50, 100, a"
   },
   "tree": {
     "startingPot": 55,
@@ -36,7 +36,7 @@
     "maxRaisesPerStreet": 4
   },
   "solver": {
-    "maxIterations": 1000,
+    "maxIterations": 100,
     "targetExploitabilityPercent": 0.3,
     "useCompression": true
   },
