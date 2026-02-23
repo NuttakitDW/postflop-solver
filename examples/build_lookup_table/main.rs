@@ -34,7 +34,13 @@ fn main() {
         tree_config.starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
     let starting_pot = tree_config.starting_pot as f32;
 
-    let output_path = config_path.replace(".json", ".toracle");
+    let config_filename = Path::new(config_path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let output_path = format!("data/{}", config_filename.replace(".json", ".toracle"));
+    std::fs::create_dir_all("data").ok();
 
     println!("=== Build Tree-Extracted Oracle ===");
     println!("Board: {}", config.board.flop);

@@ -35,7 +35,12 @@ fn main() {
     let config = load_config(config_path);
     let (card_config, tree_config) = parse_configs(&config).unwrap();
 
-    let oracle_path = config_path.replace(".json", ".toracle");
+    let config_filename = Path::new(config_path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let oracle_path = format!("data/{}", config_filename.replace(".json", ".toracle"));
     if !Path::new(&oracle_path).exists() {
         eprintln!("Error: Oracle file not found: {}", oracle_path);
         eprintln!("Build it first:");
