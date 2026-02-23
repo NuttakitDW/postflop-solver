@@ -41,7 +41,7 @@
     "useCompression": true
   },
   "output": {
-    "filename": "data/out/cfv.flop",
+    "filename": "data/out/oracle.flop",
     "compressionLevel": 10,
     "memo": "20bb"
   }
