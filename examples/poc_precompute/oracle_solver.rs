@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 use postflop_solver::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io::{self, Read as _, Write};
 use std::mem::MaybeUninit;
@@ -46,15 +47,12 @@ impl TreeOracle {
 
         if print_progress {
             println!("  Extracted {} boundary amounts", matrices.len());
-            for (&amount, mats) in &matrices {
-                let oop_size = mats[0].len();
-                let ip_size = mats[1].len();
+            for (&amount, _mats) in &matrices {
                 println!("    amount={}: OOP matrix {}x{}, IP matrix {}x{}",
                     amount,
-                    num_hands[0], num_hands[1], // OOP player × IP opponent
-                    num_hands[1], num_hands[0], // IP player × OOP opponent
+                    num_hands[0], num_hands[1],
+                    num_hands[1], num_hands[0],
                 );
-                let _ = (oop_size, ip_size); // suppress warnings
             }
         }
 
@@ -86,29 +84,42 @@ impl TreeOracle {
                     let pname = if player == 0 { "OOP" } else { "IP" };
                     let n_player = num_hands[player];
                     let n_opp = num_hands[player ^ 1];
-                    let mut matrix = vec![0.0f32; n_player * n_opp];
 
                     let probe_start = std::time::Instant::now();
-                    for j in 0..n_opp {
-                        let mut basis = vec![0.0f32; n_opp];
-                        basis[j] = 1.0;
-                        let mut result = vec![MaybeUninit::<f32>::uninit(); n_player];
-                        compute_cfvalue_recursive(
-                            &mut result, game, node, player, &basis, false,
-                        );
-                        for i in 0..n_player {
-                            matrix[i * n_opp + j] = unsafe { result[i].assume_init() };
-                        }
 
-                        if print_progress && ((j + 1) % 50 == 0 || j + 1 == n_opp) {
-                            let elapsed = probe_start.elapsed().as_secs_f64();
-                            let rate = (j + 1) as f64 / elapsed;
-                            let remaining = (n_opp - j - 1) as f64 / rate;
-                            print!("\r  amount={} {} probing: {}/{} ({:.1}s elapsed, ~{:.0}s remaining)    ",
-                                amount, pname, j + 1, n_opp, elapsed, remaining);
-                            io::stdout().flush().unwrap();
+                    // Parallel basis vector probing with rayon.
+                    // compute_cfvalue_recursive takes &mut node but is read-only on tree data.
+                    // Wrap in MutexLike for parallel access (same pattern as library solver).
+                    let node_wrapper = MutexLike::new(node as *mut PostFlopNode as usize);
+                    let columns: Vec<Vec<f32>> = (0..n_opp)
+                        .into_par_iter()
+                        .map(|j| {
+                            let mut basis = vec![0.0f32; n_opp];
+                            basis[j] = 1.0;
+                            let mut result = vec![MaybeUninit::<f32>::uninit(); n_player];
+                            let node_ptr = *node_wrapper.lock() as *mut PostFlopNode;
+                            compute_cfvalue_recursive(
+                                &mut result, game, unsafe { &mut *node_ptr }, player, &basis, false,
+                            );
+                            result.iter().map(|v| unsafe { v.assume_init() }).collect()
+                        })
+                        .collect();
+
+                    // Assemble into row-major matrix
+                    let mut matrix = vec![0.0f32; n_player * n_opp];
+                    for j in 0..n_opp {
+                        for i in 0..n_player {
+                            matrix[i * n_opp + j] = columns[j][i];
                         }
                     }
+
+                    if print_progress {
+                        let elapsed = probe_start.elapsed().as_secs_f64();
+                        print!("\r  amount={} {} probing: {}/{} ({:.1}s)              ",
+                            amount, pname, n_opp, n_opp, elapsed);
+                        io::stdout().flush().unwrap();
+                    }
+
                     player_matrices[player] = matrix;
                 }
                 matrices.insert(amount, player_matrices);
@@ -429,7 +440,7 @@ pub fn solve_flop_fixed_iterations(
 }
 
 // =============================================================================
-// Oracle recursive DCFR (the core)
+// Oracle recursive DCFR (the core) — parallelized with rayon
 // =============================================================================
 
 fn solve_recursive_with_oracle(
@@ -463,13 +474,13 @@ fn solve_recursive_with_oracle(
         return;
     }
 
-    // Allocate CFV storage for each action
-    let mut cfv_actions = vec![0.0f32; num_actions * num_hands];
+    // Allocate CFV storage — use MutexLike for rayon parallel access
+    let cfv_actions = MutexLike::new(vec![0.0f32; num_actions * num_hands]);
 
     if node.player() == player {
-        // --- Player node: recurse, then update strategy + regrets ---
+        // --- Player node: recurse in parallel, then update strategy + regrets ---
 
-        for action in 0..num_actions {
+        (0..num_actions).into_par_iter().for_each(|action| {
             let mut action_result = vec![MaybeUninit::<f32>::uninit(); num_hands];
             {
                 let mut child = node.play(action);
@@ -477,10 +488,21 @@ fn solve_recursive_with_oracle(
                     &mut action_result, game, oracle, &mut child, player, cfreach, params,
                 );
             }
+            // Write to distinct row — no data race
+            let cfv = cfv_actions.lock();
+            let offset = action * num_hands;
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (cfv.as_ptr() as *mut f32).add(offset),
+                    num_hands,
+                )
+            };
             for (i, v) in action_result.iter().enumerate() {
-                cfv_actions[action * num_hands + i] = unsafe { v.assume_init() };
+                dst[i] = unsafe { v.assume_init() };
             }
-        }
+        });
+
+        let cfv_actions = cfv_actions.lock();
 
         // Regret matching: compute current strategy from regrets
         let strategy = regret_matching(node.regrets(), num_actions, num_hands);
@@ -526,7 +548,7 @@ fn solve_recursive_with_oracle(
             }
         }
 
-        for action in 0..num_actions {
+        (0..num_actions).into_par_iter().for_each(|action| {
             let mut action_result = vec![MaybeUninit::<f32>::uninit(); num_hands];
             {
                 let mut child = node.play(action);
@@ -536,10 +558,21 @@ fn solve_recursive_with_oracle(
                     params,
                 );
             }
+            // Write to distinct row — no data race
+            let cfv = cfv_actions.lock();
+            let offset = action * num_hands;
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (cfv.as_ptr() as *mut f32).add(offset),
+                    num_hands,
+                )
+            };
             for (i, v) in action_result.iter().enumerate() {
-                cfv_actions[action * num_hands + i] = unsafe { v.assume_init() };
+                dst[i] = unsafe { v.assume_init() };
             }
-        }
+        });
+
+        let cfv_actions = cfv_actions.lock();
 
         // Sum CFVs across opponent's actions
         for h in 0..num_hands {
@@ -587,10 +620,10 @@ pub fn compute_cfvalue_with_oracle(
         return;
     }
 
-    let mut cfv_actions = vec![0.0f32; num_actions * num_hands];
+    let cfv_actions = MutexLike::new(vec![0.0f32; num_actions * num_hands]);
 
     if node.player() == player {
-        for action in 0..num_actions {
+        (0..num_actions).into_par_iter().for_each(|action| {
             let mut action_result = vec![MaybeUninit::<f32>::uninit(); num_hands];
             {
                 let mut child = node.play(action);
@@ -598,10 +631,20 @@ pub fn compute_cfvalue_with_oracle(
                     &mut action_result, game, oracle, &mut child, player, cfreach,
                 );
             }
+            let cfv = cfv_actions.lock();
+            let offset = action * num_hands;
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (cfv.as_ptr() as *mut f32).add(offset),
+                    num_hands,
+                )
+            };
             for (i, v) in action_result.iter().enumerate() {
-                cfv_actions[action * num_hands + i] = unsafe { v.assume_init() };
+                dst[i] = unsafe { v.assume_init() };
             }
-        }
+        });
+
+        let cfv_actions = cfv_actions.lock();
 
         // Use normalized strategy (average) — same as compute_cfvalue_recursive
         let strategy = normalized_strategy(node.strategy(), num_actions, num_hands);
@@ -631,7 +674,7 @@ pub fn compute_cfvalue_with_oracle(
             }
         }
 
-        for action in 0..num_actions {
+        (0..num_actions).into_par_iter().for_each(|action| {
             let mut action_result = vec![MaybeUninit::<f32>::uninit(); num_hands];
             {
                 let mut child = node.play(action);
@@ -640,10 +683,20 @@ pub fn compute_cfvalue_with_oracle(
                     &cfreach_actions[action * row_size..(action + 1) * row_size],
                 );
             }
+            let cfv = cfv_actions.lock();
+            let offset = action * num_hands;
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (cfv.as_ptr() as *mut f32).add(offset),
+                    num_hands,
+                )
+            };
             for (i, v) in action_result.iter().enumerate() {
-                cfv_actions[action * num_hands + i] = unsafe { v.assume_init() };
+                dst[i] = unsafe { v.assume_init() };
             }
-        }
+        });
+
+        let cfv_actions = cfv_actions.lock();
 
         for h in 0..num_hands {
             let mut total = 0.0f32;
