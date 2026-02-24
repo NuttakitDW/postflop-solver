@@ -52,5 +52,5 @@ Options:
 
 
 # Oracle Lookup Table
-cargo run --example build_lookup_table --release --features "bincode rayon" -- config/A-oracle-1.json
-cargo run --example solve_with_oracle --release --features "bincode rayon" -- config/A-oracle.json
+cargo run --example build_lookup_table --release --features "bincode rayon" -- config/A-oracle-5.json
+cargo run --example solve_with_oracle --release --features "bincode rayon" -- config/A-oracle-5.json
