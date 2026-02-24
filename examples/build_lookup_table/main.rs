@@ -1,6 +1,6 @@
 //! Build tree-extracted oracle (CFV matrices at turn boundary) and save to file.
 //!
-//! Steps: parse config → build full tree → solve → extract oracle → save .toracle
+//! Steps: parse config → build full tree → solve → extract oracle → save .oracle
 //!
 //! Usage:
 //!   cargo run --example build_lookup_table --release --features "bincode rayon" -- config/poc.json
@@ -34,7 +34,13 @@ fn main() {
         tree_config.starting_pot as f32 * config.solver.target_exploitability_percent / 100.0;
     let starting_pot = tree_config.starting_pot as f32;
 
-    let output_path = config_path.replace(".json", ".toracle");
+    let config_filename = Path::new(config_path)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let output_path = format!("data/oracles/{}.oracle", config_filename);
+    std::fs::create_dir_all("data/oracles").ok();
 
     println!("=== Build Tree-Extracted Oracle ===");
     println!("Board: {}", config.board.flop);

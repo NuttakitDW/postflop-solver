@@ -1,6 +1,6 @@
 //! Solve a flop game using a pre-built oracle at the turn boundary.
 //!
-//! Loads a .toracle file and runs flop-only DCFR. The oracle provides CFVs
+//! Loads a .oracle file and runs flop-only DCFR. The oracle provides CFVs
 //! at turn chance nodes via matrix multiply, replacing the turn/river subtree.
 //!
 //! Usage:
@@ -35,7 +35,12 @@ fn main() {
     let config = load_config(config_path);
     let (card_config, tree_config) = parse_configs(&config).unwrap();
 
-    let oracle_path = config_path.replace(".json", ".toracle");
+    let config_filename = Path::new(config_path)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let oracle_path = format!("data/oracles/{}.oracle", config_filename);
     if !Path::new(&oracle_path).exists() {
         eprintln!("Error: Oracle file not found: {}", oracle_path);
         eprintln!("Build it first:");
