@@ -1,103 +1,169 @@
-# Oracle Solver vs Standard Solver: Strategy Mismatch Analysis
+# NN-Accelerated Postflop Solver — Model Spec
 
-## Problem
+## Goal
 
-When running `solve_with_oracle` (precomputed table lookup), the flop OOP strategy
-does not match the standard CFR result from `make start` (backend_solver).
+Replace turn/river subtree simulation with a Neural Network during DCFR solving.
+The NN predicts counterfactual values (CFVs) at the flop-to-turn boundary,
+eliminating the most expensive part of the computation.
 
-The oracle solver produces noticeably different strategy frequencies — many hands
-that should be mostly check show mixed bet/check, and vice versa. Average strategy
-difference is ~9-10% across all elements.
+## Background: Why Static Values Don't Work
 
-## Definitive Finding: Structural Limitation (NOT a bug)
+DCFR equilibrium selection depends on the CFV **evolution path**, not just the
+final Nash values. A static oracle (fixed Nash CFV matrix) produces ~10% average
+strategy difference because it freezes turn/river CFVs at Nash from iteration 0,
+causing DCFR to converge to a different equilibrium at near-indifferent hands.
 
-After exhaustive testing of 5 different approaches, the ~9-10% strategy difference
-is **inherent to the oracle approach** and cannot be eliminated by any combination of:
+Both the standard and oracle outputs are valid Nash equilibria, but they differ
+in strategy. The problem is structural — no parameter tuning can fix it.
 
-- convergence_mode timing adjustments
-- Full-tree warmup (hybrid approach)
-- Exploit ratio-scaled convergence thresholds
+## Proven Concept: Dynamic Boundary Oracle
 
-### Test Results (config: 9s6d6c, pot=55, stack=180, 1000 iters)
+### What the NN must learn
 
-| Approach | Avg Diff | >5% Elements | Time |
-|---|---|---|---|
-| Pure oracle DCFR | 10.0% | 28.7% | 0.3s |
-| Oracle + delayed convergence_mode | 10.0% | 28.7% | 0.3s |
-| Hybrid warmup=64 + oracle | 9.1% | 26.9% | 44s |
-| Hybrid warmup=128 + oracle | 9.3% | 26.8% | 85s |
-| Hybrid warmup=160 + oracle | 10.0% | 27.5% | 125s |
-| **Standard vs Standard** | **0.0%** | **0.0%** | **111s** |
+The NN replaces a **per-iteration CFV matrix** at the flop-to-turn boundary.
+During standard DCFR solving, the turn/river subtree returns different CFVs at
+each iteration as strategies evolve. The NN must predict these evolving CFVs,
+not just the final converged values.
 
-The warmup length has NO meaningful effect on strategy accuracy. Even 160 iterations
-of full-tree warmup (past the convergence_mode activation at t=110) produces the
-same ~10% difference.
+### Boundary interface
 
-## Root Cause
+At each turn boundary node, during each DCFR iteration:
 
-### Why warmup doesn't help: gamma_t discount
+**Inputs (flop → turn):**
+- `cfreach`: opponent's counterfactual reach probabilities (vector, dim = n_opp_hands)
+- `amount`: pot size at boundary (identifies which flop action sequence led here)
+- `player`: which player's CFVs to compute (0=OOP, 1=IP)
+- Convergence state (see [Open Questions](#open-questions))
 
-DCFR's cumulative strategy formula: `cum_strategy[t] = gamma_t * cum_strategy[t-1] + strategy_t`
+**Output (turn → flop):**
+- `cfv`: player's counterfactual values (vector, dim = n_player_hands)
 
-With convergence_mode active (gamma_t >= 0.9), only the **last ~30 iterations**
-significantly contribute to the final strategy:
-- Weight of iteration 30 ago: 0.9^30 ≈ 4%
-- Weight of most recent iteration: 100%
+The relationship is linear: `cfv = M_t × cfreach` where M_t is the boundary
+matrix at iteration t. The NN can either predict M_t or directly predict cfv
+given cfreach.
 
-So regardless of warmup length, the final strategy is dominated by the LAST ~30
-iterations. If those use oracle CFVs (which differ from full-tree CFVs), the output
-diverges from the standard solver.
+### Critical constraint: player-asymmetric extraction
 
-### Why oracle CFVs differ from full-tree CFVs
+The library's `solve_step` uses **alternating updates**:
+1. Player 0 (OOP) traversal → updates player 0's regrets everywhere
+2. Player 1 (IP) traversal → sees player 0's UPDATED regrets
 
-1. **Standard DCFR**: Turn/river strategies CO-EVOLVE with flop. CFVs at the turn
-   boundary CHANGE every iteration as turn/river regrets update.
+This means at the turn/river boundary:
+- **Player 0's matrix** uses pre-iteration regrets (before any traversal)
+- **Player 1's matrix** uses player 0's updated regrets (after player 0's traversal)
 
-2. **Oracle DCFR**: Turn/river CFVs are FIXED (Nash values). Even at convergence,
-   these are not identical to the standard solver's evolving values because:
-   - Standard solver's turn/river at iteration 180 are "almost Nash" but not exact
-   - Small CFV differences cause different regret accumulation
-   - Different regrets → different strategies at indifferent decision points
+The NN must respect this asymmetry. Player 1's prediction must account for
+player 0's regret updates from the same iteration.
 
-### Why it's a different equilibrium, not a wrong one
+### Validation result
 
-Both solvers converge to valid Nash equilibria with the **same exploitability** (~0.28%).
-In poker, many hands are close to indifferent between actions (e.g., check vs small bet).
-The DCFR dynamics determine which equilibrium is selected at these indifferent points.
-Different CFV sources → different dynamics → different (but equally valid) equilibrium.
+A perfect lookup table with correct per-player extraction timing reproduces the
+standard solver output with **max diff 0.000003** (floating-point rounding only).
 
-## What was verified correct
+| Metric | Lookup Table | Static Oracle |
+|--------|-------------|---------------|
+| Avg strategy diff | 0.000000 | 10.45% |
+| Max strategy diff | 0.000003 | 60%+ |
+| Elements >1% diff | 0 (0.00%) | many |
 
-- Oracle matrix extraction: exact match with `compute_cfvalue_recursive`
-- Regret matching algorithm: identical (positive regret clamping + normalization)
-- Regret update formula: identical (`cum_regret * coef + instant_regret`)
-- Strategy accumulation: identical (`cum_strategy * gamma + current_strategy`)
-- DiscountParams: identical formula and coefficient selection
-- Regret sign check: both use `is_sign_positive()` for alpha/beta selection
-- Opponent node handling: identical cfreach weighting
-- No f32/f64 precision differences in critical paths
+## Model Architecture Considerations
 
-## Conclusion
+### Option A: Matrix prediction
 
-**It is fundamentally impossible to make the oracle solver produce the same strategies
-as the standard solver.** The oracle approach trades exact equilibrium matching for
-speed (430x faster). Both produce valid Nash equilibria with identical exploitability.
+- **Input**: (convergence_state, amount, player)
+- **Output**: full matrix M_t [n_player × n_opp]
+- Pro: one forward pass per (boundary, player, iteration)
+- Con: output dim is huge (e.g. 863×526 = 454K floats for toy config)
 
-### Valid use cases for the oracle solver
+### Option B: Direct CFV prediction
 
-1. **Training data generation**: For NN training, any valid Nash equilibrium provides
-   correct CFV labels. The exact equilibrium selection doesn't matter.
-2. **Fast approximate solutions**: When 430x speedup matters more than matching a
-   specific equilibrium.
-3. **Exploitability validation**: Oracle exploitability correctly measures convergence.
+- **Input**: (cfreach, amount, player, convergence_state)
+- **Output**: cfv vector [n_player]
+- Pro: much smaller output, natural for NN
+- Con: one forward pass per (boundary, player, iteration) — same frequency,
+  but input includes the full cfreach vector
 
-### If exact standard solver match is required
+### Option C: Low-rank matrix approximation
 
-Run the standard solver (`make start` or `solve()` directly). There is no shortcut
-that preserves the exact DCFR dynamics.
+- **Input**: (convergence_state, amount, player)
+- **Output**: factors U [n_player × k], V [k × n_opp] where M ≈ U × V
+- Pro: compressed representation, captures structure
+- Con: rank k selection, training complexity
+
+Option B is likely the most practical starting point.
+
+## Training Data Pipeline
+
+### Generation (per spot)
+
+1. Run `build_dynamic_oracle` with a config — performs full standard DCFR solve
+2. At each iteration, extracts boundary matrix M_t for each (amount, player)
+   with correct per-player timing
+3. Stores boundary pairs to `.dpairs` file
+
+From each snapshot's matrix M_t, training pairs can be generated:
+- Sample cfreach vectors (random, or record actual cfreach during solving)
+- Compute cfv = M_t × cfreach
+- Label with (iteration, exploitability, amount, player)
+
+### Cost
+
+- Requires full-tree solve per spot (same cost as normal solving + extraction overhead)
+- Toy config (863 OOP, 526 IP, 3 boundaries): ~326s, 509 MB per spot
+- This is a one-time cost per spot; the trained NN amortizes across inference
+
+### Generalization across spots
+
+One spot is insufficient for a generalizable model. Training data must span:
+
+| Dimension | Examples |
+|-----------|----------|
+| Board texture | Paired, monotone, rainbow, connected, disconnected |
+| Ranges | Different preflop action sequences (SRP, 3bet, 4bet) |
+| Stack depth | 10bb to 200bb+ effective |
+| Tree structure | Different bet sizes, raise counts |
+
+The number of training spots needed is an empirical question.
+
+## Open Questions
+
+### Convergence state representation
+
+Iteration number alone won't generalize across spots (spot A converges in 48
+iterations, spot B in 500). Candidates:
+
+| Feature | Pro | Con |
+|---------|-----|-----|
+| Iteration number | Simple | Doesn't generalize |
+| Exploitability | Directly measures convergence | Expensive to compute |
+| Normalized iteration (iter/total) | Simple | Requires knowing total in advance |
+| Flop-side regret magnitudes | Cheap, local signal | Unclear if sufficient |
+| cfreach delta between iterations | Measures stability | Requires tracking history |
+
+### Spot parameterization for generalization
+
+How to encode spot-level features (board, ranges, stack) as NN inputs so the
+model generalizes to unseen spots.
+
+### Training objective
+
+- MSE on CFV vectors?
+- Strategy-weighted loss (weight by actual cfreach)?
+- Loss that prioritizes early iterations (where dynamics matter most)?
 
 ## Files
 
-- `examples/debug_oracle.rs`: Comparison tool (untracked)
-- `docs/fix-oracle-convergence-mode.md`: This document
-- All code changes from experiments were reverted
+| File | Description |
+|------|-------------|
+| `examples/build_dynamic_oracle/main.rs` | Training data generator (records boundary pairs during DCFR) |
+| `examples/compare_flop_files.rs` | Strategy comparison tool |
+| `config/toy.json` | Toy config (C-oracle-3 ranges, small tree) |
+| `data/oracles/toy.dpairs` | Training pairs (294 pairs, ~1.6 KB) |
+| `data/out/toy.flop` | Standard-solved tree |
+
+## Commands
+
+```bash
+# Generate training data (records cfreach/cfv pairs at turn boundary)
+cargo run --example build_dynamic_oracle --release --features "bincode rayon" -- config/toy.json
+```

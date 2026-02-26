@@ -35,6 +35,11 @@ pub struct TreeOracle {
 }
 
 impl TreeOracle {
+    /// Create oracle from pre-built matrices.
+    pub fn from_matrices(matrices: HashMap<i32, [Vec<f32>; 2]>, num_hands: [usize; 2]) -> Self {
+        Self { matrices, num_hands }
+    }
+
     /// Build oracle by probing the fully solved tree at turn boundary nodes.
     /// For each boundary amount, extracts a matrix by calling compute_cfvalue_recursive
     /// with basis vectors at the turn chance node.
