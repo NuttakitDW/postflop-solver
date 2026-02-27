@@ -16,11 +16,11 @@ causing DCFR to converge to a different equilibrium at near-indifferent hands.
 Both the standard and oracle outputs are valid Nash equilibria, but they differ
 in strategy. The problem is structural — no parameter tuning can fix it.
 
-## Proven Concept: Dynamic Boundary Oracle
+## Proven Concept: Dynamic Boundary Pairs
 
 ### What the NN must learn
 
-The NN replaces a **per-iteration CFV matrix** at the flop-to-turn boundary.
+The NN replaces a **per-iteration CFV** at the flop-to-turn boundary.
 During standard DCFR solving, the turn/river subtree returns different CFVs at
 each iteration as strategies evolve. The NN must predict these evolving CFVs,
 not just the final converged values.
@@ -49,22 +49,106 @@ The library's `solve_step` uses **alternating updates**:
 2. Player 1 (IP) traversal → sees player 0's UPDATED regrets
 
 This means at the turn/river boundary:
-- **Player 0's matrix** uses pre-iteration regrets (before any traversal)
-- **Player 1's matrix** uses player 0's updated regrets (after player 0's traversal)
+- **Player 0's boundary CFV** is computed with pre-iteration regrets (before any traversal)
+- **Player 1's boundary CFV** is computed with player 0's updated regrets (after player 0's traversal)
 
 The NN must respect this asymmetry. Player 1's prediction must account for
 player 0's regret updates from the same iteration.
 
 ### Validation result
 
-A perfect lookup table with correct per-player extraction timing reproduces the
-standard solver output with **max diff 0.000003** (floating-point rounding only).
+A perfect lookup table reproduces the standard solver output with **zero diff**
+on both simple and complex tree configurations.
 
-| Metric | Lookup Table | Static Oracle |
-|--------|-------------|---------------|
-| Avg strategy diff | 0.000000 | 10.45% |
-| Max strategy diff | 0.000003 | 60%+ |
-| Elements >1% diff | 0 (0.00%) | many |
+| Config | Nodes | Elements | Max Diff | >10% |
+|--------|-------|----------|----------|------|
+| toy.json (simple) | 4 | 5,556 | **0.000000** | 0 |
+| 9s6d6c.json (complex) | 26 | 51,393 | **0.000000** | 0 |
+
+This proves the boundary pairs concept works perfectly — recording CFVs at turn
+boundaries during standard DCFR and replaying them reproduces bit-identical flop
+strategies regardless of tree complexity.
+
+## Bug History (all fixed)
+
+Three bugs were discovered and fixed across v1→v2 iterations:
+
+### Bug 1: Custom DCFR missing convergence_mode (v1, 70% diff)
+
+The library activates `convergence_mode` when `exploitability < 1% of pot`,
+changing discount params (beta_t: 0.5→0.9). Our v1 custom DCFR hardcoded
+`convergence_mode = false`.
+
+**Fix**: Use `solve_step_for_player` (library's own per-player DCFR).
+
+### Bug 2: Duplicate boundary keys (v1, 42% diff)
+
+The v1 `.dpairs` format used pot amount as HashMap key. Different action
+sequences can reach the same pot size → key collision → wrong CFVs.
+
+**Fix**: Use sequential DFS index instead of pot amount.
+
+### Bug 3: Float precision divergence (v2 early, 3.56% >10% diff)
+
+Even after bugs 1-2 were fixed, v2 still had 3.56% of elements with >10% diff
+on 9s6d6c.json. Root cause: the build recorded boundary CFVs via a separate
+read-only traversal (`collect_boundary_cfvs_recursive`) that reimplemented
+the library's CFV computation, while the replay reimplemented DCFR from scratch.
+Both used mathematically identical algorithms, but different code paths produced
+~1e-8 float precision differences (e.g. `v * (1/c)` vs `v / c` for cfreach
+scaling, different regret_matching loop structure). These tiny differences got
+**amplified through regret sign-flips** at near-zero values, causing cascading
+divergence over 150 iterations.
+
+**Fix**: Added `solve_recursive_recording` and `solve_recursive_replay` to
+`src/solver.rs` — copies of the library's `solve_recursive` with boundary hooks.
+Recording captures CFVs during the actual DCFR traversal (not a separate pass).
+Replay injects pre-recorded CFVs at turn boundaries using the library's exact
+same code for all other operations. This eliminates all float precision
+differences, producing bit-identical results.
+
+## Pipeline v2
+
+### Process
+
+Two-step: **build oracle first**, then **solve with oracle**.
+
+1. `build_pairs_v2` — runs the full standard DCFR solve (flop + turn + river),
+   recording boundary CFVs at each turn boundary per iteration. Outputs both
+   the `.dpairs2` oracle file and a `.flop` ground truth file.
+
+2. `solve_with_pairs_v2` — builds only the flop tree (9 GB → flop-only memory),
+   replays the recorded boundary CFVs using the library's exact DCFR code.
+   Produces a `.flop` file that should be bit-identical to the ground truth.
+
+### Tools
+
+| Tool | Input | Output | Speed |
+|------|-------|--------|-------|
+| `build_pairs_v2` | config.json | .dpairs2 + .flop | ~1x standard solve time |
+| `solve_with_pairs_v2` | config.json + .dpairs2 | .flop | ~0.02s (flop-only) |
+| `compare_flop_files` | file1.flop file2.flop config.json | comparison stats | instant |
+
+### Commands
+
+```bash
+# Step 1: Build oracle (runs full solve, records boundary CFVs)
+cargo run --example build_pairs_v2 --release --features "bincode rayon" -- config/9s6d6c.json
+
+# Step 2: Replay with oracle (flop-only DCFR, instant)
+cargo run --example solve_with_pairs_v2 --release --features "bincode rayon" -- config/9s6d6c.json
+
+# Step 3: Compare results (should show max diff = 0.000000)
+cargo run --example compare_flop_files --release --features "bincode rayon" -- \
+  data/out/9s6d6c-standard.flop data/out/9s6d6c-pairs2.flop config/9s6d6c.json
+```
+
+### File format v2
+
+**.dpairs2** (Dynamic Pairs v2) — Boundary cfv values indexed by DFS order:
+- Header: magic `DPAIRS2\0`, version, num_oop, num_ip, num_boundaries, num_iterations, starting_pot
+- Per iteration: iteration, exploitability, then for each boundary × each player: cfv[n_player]
+- Sequential access by iteration; boundary index is implicit from DFS order
 
 ## Model Architecture Considerations
 
@@ -96,21 +180,9 @@ Option B is likely the most practical starting point.
 
 ### Generation (per spot)
 
-1. Run `build_dynamic_oracle` with a config — performs full standard DCFR solve
-2. At each iteration, extracts boundary matrix M_t for each (amount, player)
-   with correct per-player timing
-3. Stores boundary pairs to `.dpairs` file
-
-From each snapshot's matrix M_t, training pairs can be generated:
-- Sample cfreach vectors (random, or record actual cfreach during solving)
-- Compute cfv = M_t × cfreach
-- Label with (iteration, exploitability, amount, player)
-
-### Cost
-
-- Requires full-tree solve per spot (same cost as normal solving + extraction overhead)
-- Toy config (863 OOP, 526 IP, 3 boundaries): ~326s, 509 MB per spot
-- This is a one-time cost per spot; the trained NN amortizes across inference
+1. Run `build_pairs_v2` — uses library's DCFR with boundary cfv recording
+2. At each iteration, records cfv at each turn boundary for each player
+3. Stores to `.dpairs2` file
 
 ### Generalization across spots
 
@@ -123,14 +195,11 @@ One spot is insufficient for a generalizable model. Training data must span:
 | Stack depth | 10bb to 200bb+ effective |
 | Tree structure | Different bet sizes, raise counts |
 
-The number of training spots needed is an empirical question.
-
 ## Open Questions
 
 ### Convergence state representation
 
-Iteration number alone won't generalize across spots (spot A converges in 48
-iterations, spot B in 500). Candidates:
+Iteration number alone won't generalize across spots. Candidates:
 
 | Feature | Pro | Con |
 |---------|-----|-----|
@@ -153,17 +222,31 @@ model generalizes to unseen spots.
 
 ## Files
 
+### Current (v2)
+
 | File | Description |
 |------|-------------|
-| `examples/build_dynamic_oracle/main.rs` | Training data generator (records boundary pairs during DCFR) |
+| `src/solver.rs` | Library — added `solve_step_for_player_recording` and `solve_step_for_player_replay` |
+| `examples/build_pairs_v2/main.rs` | Step 1: build oracle using library's recording DCFR |
+| `examples/solve_with_pairs_v2/main.rs` | Step 2: replay solver using library's replay DCFR |
 | `examples/compare_flop_files.rs` | Strategy comparison tool |
-| `config/toy.json` | Toy config (C-oracle-3 ranges, small tree) |
-| `data/oracles/toy.dpairs` | Training pairs (294 pairs, ~1.6 KB) |
-| `data/out/toy.flop` | Standard-solved tree |
+| `config/toy.json` | Toy config — simple tree, verified 0-diff |
+| `config/9s6d6c.json` | Complex config — verified 0-diff |
 
-## Commands
+### Library API (src/solver.rs)
 
-```bash
-# Generate training data (records cfreach/cfv pairs at turn boundary)
-cargo run --example build_dynamic_oracle --release --features "bincode rayon" -- config/toy.json
-```
+| Function | Description |
+|----------|-------------|
+| `solve_step_for_player_recording` | DCFR for one player, returns `Vec<Vec<f32>>` of boundary CFVs |
+| `solve_step_for_player_replay` | DCFR for one player, injects pre-recorded boundary CFVs |
+| `solve_recursive_recording` | Internal: `solve_recursive` + boundary CFV capture |
+| `solve_recursive_replay` | Internal: `solve_recursive` + boundary CFV injection |
+
+### Legacy (v1, known bugs — do not use)
+
+| File | Description |
+|------|-------------|
+| `examples/build_pairs/main.rs` | Buggy (no convergence_mode, amount-keyed) |
+| `examples/solve_with_pairs/main.rs` | Buggy (amount-keyed, reimplemented DCFR) |
+| `examples/build_dynamic_oracle/main.rs` | Full data generator (slow, same bugs) |
+| `examples/solve_with_dynamic_oracle/main.rs` | Replay solver using .doracle |

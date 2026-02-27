@@ -52,5 +52,5 @@ Options:
 
 
 # Oracle Lookup Table
-  cargo run --example build_pairs --release --features "bincode rayon" -- config/toy.json
-  cargo run --example solve_with_pairs --release --features "bincode rayon" -- config/toy.json
+cargo run --example build_pairs_v2 --release --features "bincode rayon" -- config/9s6d6c.json
+cargo run --example solve_with_pairs_v2 --release --features "bincode rayon" -- config/9s6d6c.json
