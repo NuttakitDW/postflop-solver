@@ -242,6 +242,28 @@ model generalizes to unseen spots.
 | `solve_recursive_recording` | Internal: `solve_recursive` + boundary CFV capture |
 | `solve_recursive_replay` | Internal: `solve_recursive` + boundary CFV injection |
 
+## Phase 2: NN Training Data
+
+### Missing from .dpairs2: cfreach
+
+The current `.dpairs2` format only stores the CFV output at each boundary but
+**not the cfreach input** that produced it. This is fine for Phase 1 (deterministic
+replay — iteration number alone determines cfreach), but the NN needs to learn:
+
+```
+f(cfreach, convergence_state, boundary_id, player) → cfv
+```
+
+Without cfreach in the training data, the NN cannot generalize — it would just
+memorize `(iteration, boundary) → cfv` which is useless for new positions.
+
+### TODO for Phase 2
+
+- Record cfreach alongside cfv in `solve_recursive_recording` (the cfreach is
+  already there as a parameter, just needs to be captured at boundary nodes)
+- Update `.dpairs2` format (or create `.dpairs3`) to store both cfreach and cfv
+- Design NN input encoding: cfreach vector + convergence signal + boundary identity
+
 ### Legacy (v1, known bugs — do not use)
 
 | File | Description |

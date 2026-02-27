@@ -1,6 +1,6 @@
 {
   "board": {
-    "flop": "9s6d6c",
+    "flop": "Jc8c6s",
     "turn": null,
     "river": null
   },
@@ -41,8 +41,8 @@
     "useCompression": false
   },
   "output": {
-    "filename": "data/out/9s6d6c.flop",
+    "filename": "data/out/Jc8c6s.flop",
     "compressionLevel": null,
-    "memo": "9s6d6c"
+    "memo": "Jc8c6s"
   }
 }
