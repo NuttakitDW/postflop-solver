@@ -1,5 +1,7 @@
 //! Shared config parsing for examples.
 
+pub mod isomorphism;
+
 use postflop_solver::*;
 use serde::{Deserialize, Serialize};
 
@@ -98,6 +100,11 @@ pub struct SolverConfig {
     pub tree: TreeSettings,
     pub solver: SolverSettings,
     pub output: OutputSettings,
+    /// Optional: board name of an existing oracle to reuse (e.g., "As3s4s").
+    /// The oracle file `data/oracles/{oracleBoard}.dpairs2` must exist.
+    /// The boards must be suit-isomorphic (same ranks, different suits).
+    #[serde(default)]
+    pub oracle_board: Option<String>,
 }
 
 fn normalize_bet_sizes(s: &str) -> String {

@@ -4,6 +4,9 @@
 //! pre-recorded boundary CFVs injected at turn boundaries. This guarantees
 //! float-identical flop strategies compared to the standard solver.
 //!
+//! Supports suit isomorphism: if the config specifies `oracleBoard`, the solver
+//! loads that board's oracle and permutes CFVs to match the actual board.
+//!
 //! Usage:
 //!   cargo run --example solve_with_pairs_v2 --release --features "bincode rayon" -- config/toy.json
 //!
@@ -13,6 +16,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use common::isomorphism::*;
 use common::*;
 use postflop_solver::*;
 use std::env;
@@ -117,6 +121,45 @@ impl BoundaryPairsV2 {
 }
 
 // =============================================================================
+// Isomorphism context: precomputed permutation tables
+// =============================================================================
+
+struct IsomorphismContext {
+    /// Per-player hand index permutation: permutation[player][actual_idx] = oracle_idx
+    hand_permutation: [Vec<usize>; 2],
+    oracle_board_str: String,
+    actual_board_str: String,
+}
+
+impl IsomorphismContext {
+    /// Build isomorphism context from oracle and actual flops.
+    fn new(
+        oracle_flop: &[Card; 3],
+        actual_flop: &[Card; 3],
+        ranges: &[Range; 2],
+    ) -> Self {
+        let suit_map = compute_suit_permutation(oracle_flop, actual_flop)
+            .expect("Boards are not suit-isomorphic (different rank patterns)");
+
+        let hand_permutation = [
+            compute_hand_permutation(oracle_flop, actual_flop, &ranges[0], &suit_map),
+            compute_hand_permutation(oracle_flop, actual_flop, &ranges[1], &suit_map),
+        ];
+
+        Self {
+            hand_permutation,
+            oracle_board_str: flop_to_string(oracle_flop),
+            actual_board_str: flop_to_string(actual_flop),
+        }
+    }
+
+    /// Permute a CFV vector from oracle hand ordering to actual hand ordering.
+    fn permute(&self, oracle_cfv: &[f32], player: usize) -> Vec<f32> {
+        permute_cfv(oracle_cfv, &self.hand_permutation[player])
+    }
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -139,7 +182,33 @@ fn main() {
         .unwrap()
         .to_str()
         .unwrap();
-    let pairs_path = format!("data/oracles/{}.dpairs2", config_filename);
+
+    // Determine oracle path and build isomorphism context if needed
+    let (pairs_path, iso_ctx) = if let Some(ref oracle_board_str) = config.oracle_board {
+        let oracle_flop = flop_from_str(oracle_board_str)
+            .unwrap_or_else(|e| {
+                eprintln!("Error: Failed to parse oracleBoard '{}': {}", oracle_board_str, e);
+                std::process::exit(1);
+            });
+
+        let pairs_path = format!("data/oracles/{}.dpairs2", oracle_board_str);
+
+        if oracle_flop == card_config.flop {
+            // Same board — no permutation needed
+            (pairs_path, None)
+        } else {
+            let ctx = IsomorphismContext::new(
+                &oracle_flop,
+                &card_config.flop,
+                &card_config.range,
+            );
+            (pairs_path, Some(ctx))
+        }
+    } else {
+        let pairs_path = format!("data/oracles/{}.dpairs2", config_filename);
+        (pairs_path, None)
+    };
+
     if !Path::new(&pairs_path).exists() {
         eprintln!("Error: Training data not found: {}", pairs_path);
         eprintln!("Build it first:");
@@ -154,6 +223,12 @@ fn main() {
 
     println!("=== Phase 1 v2: Solve with Boundary Pairs ===");
     println!("Config: {}", config_path);
+    if let Some(ref ctx) = iso_ctx {
+        println!(
+            "Isomorphism: {} oracle -> {} actual",
+            ctx.oracle_board_str, ctx.actual_board_str
+        );
+    }
     println!();
 
     // Load boundary pairs
@@ -195,6 +270,15 @@ fn main() {
         || game.num_private_hands(1) != pairs.num_hands[1]
     {
         eprintln!("Error: Hand counts don't match between game and pairs file");
+        eprintln!(
+            "  Game: OOP={}, IP={}",
+            game.num_private_hands(0),
+            game.num_private_hands(1)
+        );
+        eprintln!(
+            "  Pairs: OOP={}, IP={}",
+            pairs.num_hands[0], pairs.num_hands[1]
+        );
         std::process::exit(1);
     }
     println!();
@@ -212,9 +296,15 @@ fn main() {
         let convergence_mode = pairs.convergence_mode_at(t);
 
         for player in 0..2 {
-            // Extract boundary CFVs for this iteration/player
+            // Extract boundary CFVs for this iteration/player, applying permutation if needed
             let boundary_cfvs: Vec<Vec<f32>> = (0..pairs.num_boundaries)
-                .map(|b| pairs.get_cfv(t, b, player).to_vec())
+                .map(|b| {
+                    let cfv = pairs.get_cfv(t, b, player);
+                    match &iso_ctx {
+                        Some(ctx) => ctx.permute(cfv, player),
+                        None => cfv.to_vec(),
+                    }
+                })
                 .collect();
 
             // Use library's exact DCFR with injected boundary CFVs
@@ -267,6 +357,12 @@ fn main() {
     println!();
     println!("=== Summary ===");
     println!("Output: {}", output_path);
+    if let Some(ref ctx) = iso_ctx {
+        println!(
+            "Isomorphism: {} -> {}",
+            ctx.oracle_board_str, ctx.actual_board_str
+        );
+    }
     println!("Pairs load: {:.3}s", load_time);
     println!(
         "Solve time: {:.2}s ({} iterations, {:.4}s/iter)",
