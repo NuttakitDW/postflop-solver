@@ -554,6 +554,92 @@ pub fn solve_step_for_player_replay(
         "Boundary count mismatch: visited {} expected {}", boundary_counter, boundary_cfvs.len());
 }
 
+/// Collects opponent cfreach at each turn boundary node using current strategies.
+///
+/// Traverses the flop tree without modifying any state (no regret/strategy updates).
+/// Returns one cfreach vector per boundary in DFS order.
+pub fn collect_boundary_cfreaches(
+    game: &PostFlopGame,
+    player: usize,
+) -> Vec<Vec<f32>> {
+    if !game.is_ready() {
+        panic!("Game is not ready");
+    }
+
+    let mut root = game.root();
+    let mut boundaries = Vec::new();
+    collect_cfreaches_recursive(
+        game,
+        &mut root,
+        player,
+        game.initial_weights(player ^ 1),
+        &mut boundaries,
+    );
+    boundaries
+}
+
+fn collect_cfreaches_recursive(
+    game: &PostFlopGame,
+    node: &mut PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    boundaries: &mut Vec<Vec<f32>>,
+) {
+    if node.is_terminal() {
+        return;
+    }
+
+    let num_actions = node.num_actions();
+
+    // Turn boundary: record cfreach and stop
+    if node.is_chance() && node.turn() == NOT_DEALT {
+        boundaries.push(cfreach.to_vec());
+        return;
+    }
+
+    if num_actions == 1 && !node.is_chance() {
+        collect_cfreaches_recursive(game, &mut node.play(0), player, cfreach, boundaries);
+        return;
+    }
+
+    if node.is_chance() {
+        let chance_factor = game.chance_factor(node);
+        let cfreach_updated: Vec<f32> = cfreach.iter()
+            .map(|&v| v / chance_factor as f32)
+            .collect();
+        for action in 0..num_actions {
+            collect_cfreaches_recursive(
+                game, &mut node.play(action), player, &cfreach_updated, boundaries,
+            );
+        }
+    } else if node.player() == player {
+        // Current player's node: cfreach passes through unchanged
+        for action in 0..num_actions {
+            collect_cfreaches_recursive(
+                game, &mut node.play(action), player, cfreach, boundaries,
+            );
+        }
+    } else {
+        // Opponent's node: split cfreach by opponent strategy
+        let mut cfreach_actions = regret_matching(node.regrets(), num_actions);
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut cfreach_actions, locking);
+
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        for action in 0..num_actions {
+            collect_cfreaches_recursive(
+                game, &mut node.play(action), player,
+                row(&cfreach_actions, action, row_size),
+                boundaries,
+            );
+        }
+    }
+}
+
 /// Like `solve_recursive` but records boundary CFVs at turn boundary chance nodes.
 fn solve_recursive_recording(
     result: &mut [MaybeUninit<f32>],
