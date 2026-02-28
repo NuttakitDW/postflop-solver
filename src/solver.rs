@@ -520,6 +520,7 @@ pub fn solve_step_for_player_recording(
     let params = DiscountParams::new(current_iteration, convergence_mode);
     let mut result = Vec::with_capacity(game.num_private_hands(player));
     let mut boundaries = Vec::new();
+    let mut boundary_cfreaches = Vec::new();
     solve_recursive_recording(
         result.spare_capacity_mut(),
         game,
@@ -528,8 +529,46 @@ pub fn solve_step_for_player_recording(
         game.initial_weights(player ^ 1),
         &params,
         &mut boundaries,
+        &mut boundary_cfreaches,
     );
     boundaries
+}
+
+/// Like `solve_step_for_player_recording` but also returns opponent reach
+/// probabilities (cfreach) at each turn boundary, for NN training data.
+///
+/// Returns (boundary_cfvs, boundary_cfreaches).
+/// - boundary_cfvs[i]: CFV vector for the i-th turn boundary (indexed by player's hands)
+/// - boundary_cfreaches[i]: opponent reach probabilities at the i-th turn boundary
+pub fn solve_step_for_player_recording_with_cfreach(
+    game: &PostFlopGame,
+    current_iteration: u32,
+    player: usize,
+    convergence_mode: bool,
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    if game.is_solved() {
+        panic!("Game is already solved");
+    }
+    if !game.is_ready() {
+        panic!("Game is not ready");
+    }
+
+    let mut root = game.root();
+    let params = DiscountParams::new(current_iteration, convergence_mode);
+    let mut result = Vec::with_capacity(game.num_private_hands(player));
+    let mut boundaries = Vec::new();
+    let mut boundary_cfreaches = Vec::new();
+    solve_recursive_recording(
+        result.spare_capacity_mut(),
+        game,
+        &mut root,
+        player,
+        game.initial_weights(player ^ 1),
+        &params,
+        &mut boundaries,
+        &mut boundary_cfreaches,
+    );
+    (boundaries, boundary_cfreaches)
 }
 
 /// Proceeds DCFR for a single player using pre-recorded boundary CFVs (flop-only).
@@ -578,6 +617,7 @@ fn solve_recursive_recording(
     cfreach: &[f32],
     params: &DiscountParams,
     boundaries: &mut Vec<Vec<f32>>,
+    boundary_cfreaches: &mut Vec<Vec<f32>>,
 ) {
     if node.is_terminal() {
         game.evaluate(result, node, player, cfreach);
@@ -589,7 +629,7 @@ fn solve_recursive_recording(
 
     if num_actions == 1 && !node.is_chance() {
         let child = &mut node.play(0);
-        solve_recursive_recording(result, game, child, player, cfreach, params, boundaries);
+        solve_recursive_recording(result, game, child, player, cfreach, params, boundaries, boundary_cfreaches);
         return;
     }
 
@@ -622,6 +662,7 @@ fn solve_recursive_recording(
                 &cfreach_updated,
                 params,
                 boundaries,
+                boundary_cfreaches,
             );
         }
 
@@ -650,12 +691,13 @@ fn solve_recursive_recording(
             r.write(v as f32);
         });
 
-        // Record boundary CFV at turn boundary
+        // Record boundary CFV and cfreach at turn boundary
         if node.turn() == NOT_DEALT {
             let cfv: Vec<f32> = result.iter()
                 .map(|v| unsafe { v.assume_init() })
                 .collect();
             boundaries.push(cfv);
+            boundary_cfreaches.push(cfreach.to_vec());
         }
     } else if node.player() == player {
         for action in 0..num_actions {
@@ -667,6 +709,7 @@ fn solve_recursive_recording(
                 cfreach,
                 params,
                 boundaries,
+                boundary_cfreaches,
             );
         }
 
@@ -714,6 +757,7 @@ fn solve_recursive_recording(
                 row(&cfreach_actions, action, row_size),
                 params,
                 boundaries,
+                boundary_cfreaches,
             );
         }
 
