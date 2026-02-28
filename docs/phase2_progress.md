@@ -227,4 +227,23 @@ The model was trained on a **single trajectory** (9,000 samples). Once inference
 3. **Run more iterations at inference** — let DCFR self-correct beyond the 180 training iterations
 4. **Better model fit** — reduce 0.0006 RMSE further
 
+---
+
+## Open Issue: Loss Curve Spike at Epoch ~360 (2025-03-01)
+
+The training loss curve shows an unusual spike around epoch 360/500 — loss jumps ~50x (from 9.4e-6 to 4.8e-4) then slowly recovers.
+
+**Suspected cause**: Ranger21 has a built-in warm-down that starts at `72% × 500 = epoch 360` (hardcoded `warmdown_start_pct=0.72`). This internal LR schedule likely conflicts with the external OneCycleLR, both fighting over `group["lr"]`.
+
+**Attempted fixes** (both failed — solver output was worse despite smoother loss curves):
+
+1. **Remove OneCycleLR, let Ranger21 handle scheduling**: Smoother loss curve, but solver result was completely wrong.
+2. **Disable Ranger21's internal scheduling (`use_warmup=False, warmdown_active=False`), keep OneCycleLR**: Also produced wrong solver output.
+
+**Current status**: Reverted to original code with both Ranger21 + OneCycleLR. Despite the ugly spike, this configuration produces the best solver results (0.6% root avg diff, 13.6% full tree). The spike remains unexplained in terms of why the conflicting schedulers produce better results than either one alone.
+
+**Remains to investigate.**
+
+---
+
 **Next steps**: Bucketing (K-dim output) for multi-board generalization — same principle as solver indexing (no wasted zeros) but board-agnostic.
