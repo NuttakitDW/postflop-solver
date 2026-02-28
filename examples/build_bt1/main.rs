@@ -49,7 +49,6 @@ fn count_turn_boundaries(game: &PostFlopGame) -> usize {
 struct IterationRecord {
     iteration: u32,
     exploitability: f32,
-    convergence_mode: bool,
     /// boundary_cfvs[player][boundary_idx] = cfv vector
     boundary_cfvs: [Vec<Vec<f32>>; 2],
     /// boundary_cfreaches[player][boundary_idx] = opponent reach vector
@@ -77,7 +76,7 @@ fn save_bt1(
     for rec in records {
         f.write_all(&rec.iteration.to_le_bytes())?;
         f.write_all(&rec.exploitability.to_le_bytes())?;
-        f.write_all(&(rec.convergence_mode as u32).to_le_bytes())?;
+        f.write_all(&0u32.to_le_bytes())?;  // reserved field
 
         for b in 0..num_boundaries {
             for player in 0..2 {
@@ -165,7 +164,6 @@ fn main() {
     println!("--- Recording boundary data (CFV + cfreach) ---");
     let mut records: Vec<IterationRecord> = Vec::new();
     let mut exploitability = compute_exploitability(&game);
-    let mut convergence_mode = false;
 
     let solve_start = Instant::now();
 
@@ -177,25 +175,20 @@ fn main() {
             break;
         }
 
-        // Match library's convergence_mode logic
         let is_power_of_4 = t > 0 && t == 1u32 << ((t.leading_zeros() ^ 31) & !1);
         if is_power_of_4 {
             exploitability = compute_exploitability(&game);
         }
 
-        if starting_pot > 0.0 && (exploitability / starting_pot * 100.0) < 1.0 {
-            convergence_mode = true;
-        }
-
         // Player 0: record boundary CFVs + cfreach + DCFR update
-        let (p0_cfvs, p0_cfreaches) = solve_step_for_player_recording_with_cfreach(&game, t, 0, convergence_mode);
+        let (p0_cfvs, p0_cfreaches) = solve_step_for_player_recording_with_cfreach(&game, t, 0);
         assert_eq!(p0_cfvs.len(), num_boundaries,
             "Player 0 boundary count mismatch: {} vs {}", p0_cfvs.len(), num_boundaries);
         assert_eq!(p0_cfreaches.len(), num_boundaries,
             "Player 0 cfreach count mismatch: {} vs {}", p0_cfreaches.len(), num_boundaries);
 
         // Player 1: record boundary CFVs + cfreach + DCFR update
-        let (p1_cfvs, p1_cfreaches) = solve_step_for_player_recording_with_cfreach(&game, t, 1, convergence_mode);
+        let (p1_cfvs, p1_cfreaches) = solve_step_for_player_recording_with_cfreach(&game, t, 1);
         assert_eq!(p1_cfvs.len(), num_boundaries,
             "Player 1 boundary count mismatch: {} vs {}", p1_cfvs.len(), num_boundaries);
         assert_eq!(p1_cfreaches.len(), num_boundaries,
@@ -211,15 +204,14 @@ fn main() {
         records.push(IterationRecord {
             iteration: t,
             exploitability,
-            convergence_mode,
             boundary_cfvs: [p0_cfvs, p1_cfvs],
             boundary_cfreaches: [p0_cfreaches, p1_cfreaches],
         });
 
         let elapsed = solve_start.elapsed().as_secs_f64();
         let pct = exploitability / starting_pot * 100.0;
-        print!("\r  iter {}: exploit={:.4}%, conv_mode={}, total={:.1}s    ",
-            t, pct, convergence_mode, elapsed);
+        print!("\r  iter {}: exploit={:.4}%, total={:.1}s    ",
+            t, pct, elapsed);
         io::stdout().flush().unwrap();
     }
     println!();
@@ -252,7 +244,6 @@ fn main() {
     println!("Iterations: {}", records.len());
     println!("Final exploitability: {:.4}%",
         records.last().map(|r| r.exploitability / starting_pot * 100.0).unwrap_or(0.0));
-    println!("Convergence mode: {}", convergence_mode);
     println!("Solve+record time: {:.2}s", solve_total);
     println!("Total time: {:.2}s", total_time);
     println!();

@@ -723,7 +723,7 @@ struct DiscountParams {
 }
 
 impl DiscountParams {
-    fn new(current_iteration: u32, convergence_mode: bool) -> Self {
+    fn new(current_iteration: u32) -> Self {
         let nearest_lower_power_of_4 = match current_iteration {
             0 => 0,
             x => 1 << ((x.leading_zeros() ^ 31) & !1),
@@ -735,18 +735,10 @@ impl DiscountParams {
         let pow_alpha = t_alpha * t_alpha.sqrt();
         let pow_gamma = (t_gamma / (t_gamma + 1.0)).powi(3);
 
-        if convergence_mode {
-            Self {
-                alpha_t: ((pow_alpha / (pow_alpha + 1.0)) as f32).max(0.9),
-                beta_t: 0.9,
-                gamma_t: (pow_gamma as f32).max(0.9),
-            }
-        } else {
-            Self {
-                alpha_t: (pow_alpha / (pow_alpha + 1.0)) as f32,
-                beta_t: 0.5,
-                gamma_t: pow_gamma as f32,
-            }
+        Self {
+            alpha_t: (pow_alpha / (pow_alpha + 1.0)) as f32,
+            beta_t: 0.5,
+            gamma_t: pow_gamma as f32,
         }
     }
 }
@@ -793,8 +785,6 @@ pub fn solve_flop(
     } else {
         0.0
     };
-    let mut convergence_mode = false;
-
     if print_progress {
         print!("iteration: 0 / {max_iterations} ");
         if starting_pot > 0.0 {
@@ -814,11 +804,7 @@ pub fn solve_flop(
             exploitability = compute_exploitability(game);
         }
 
-        if starting_pot > 0.0 && exploitability / starting_pot * 100.0 < 1.0 {
-            convergence_mode = true;
-        }
-
-        let params = DiscountParams::new(t, convergence_mode);
+        let params = DiscountParams::new(t);
 
         for player in 0..2 {
             let mut result = Vec::with_capacity(game.num_private_hands(player));
@@ -1076,9 +1062,7 @@ pub fn solve_with_oracle(
     }
 
     for t in 0..max_iterations {
-        // No convergence mode — we can't compute exploitability without
-        // the full tree, so just use standard DCFR discounting throughout.
-        let params = DiscountParams::new(t, false);
+        let params = DiscountParams::new(t);
 
         for player in 0..2 {
             let mut result = Vec::with_capacity(game.num_private_hands(player));

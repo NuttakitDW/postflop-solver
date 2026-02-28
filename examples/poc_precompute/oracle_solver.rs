@@ -260,7 +260,7 @@ struct DiscountParams {
 }
 
 impl DiscountParams {
-    fn new(t: u32, convergence_mode: bool) -> Self {
+    fn new(t: u32) -> Self {
         let nearest_lower_power_of_4 = match t {
             0 => 0,
             x => 1u32 << ((x.leading_zeros() ^ 31) & !1),
@@ -272,18 +272,10 @@ impl DiscountParams {
         let pow_alpha = t_alpha * t_alpha.sqrt();
         let pow_gamma = (t_gamma / (t_gamma + 1.0)).powi(3);
 
-        if convergence_mode {
-            Self {
-                alpha_t: ((pow_alpha / (pow_alpha + 1.0)) as f32).max(0.9),
-                beta_t: 0.9,
-                gamma_t: (pow_gamma as f32).max(0.9),
-            }
-        } else {
-            Self {
-                alpha_t: (pow_alpha / (pow_alpha + 1.0)) as f32,
-                beta_t: 0.5,
-                gamma_t: pow_gamma as f32,
-            }
+        Self {
+            alpha_t: (pow_alpha / (pow_alpha + 1.0)) as f32,
+            beta_t: 0.5,
+            gamma_t: pow_gamma as f32,
         }
     }
 }
@@ -339,7 +331,6 @@ pub fn solve_flop_with_oracle(
 ) -> f32 {
     let starting_pot = game.starting_pot() as f32;
     let mut exploitability = compute_exploitability(game);
-    let mut convergence_mode = false;
 
     if print_progress {
         let pct = exploitability / starting_pot * 100.0;
@@ -354,12 +345,7 @@ pub fn solve_flop_with_oracle(
             break;
         }
 
-        let current_pct = exploitability / starting_pot * 100.0;
-        if current_pct < 1.0 {
-            convergence_mode = true;
-        }
-
-        let params = DiscountParams::new(t, convergence_mode);
+        let params = DiscountParams::new(t);
 
         for player in 0..2 {
             let num_hands = game.num_private_hands(player);
@@ -412,7 +398,7 @@ pub fn solve_flop_fixed_iterations(
     }
 
     for t in 0..max_iterations {
-        let params = DiscountParams::new(t, false);
+        let params = DiscountParams::new(t);
 
         for player in 0..2 {
             let num_hands = game.num_private_hands(player);

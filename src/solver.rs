@@ -167,7 +167,7 @@ struct DiscountParams {
 }
 
 impl DiscountParams {
-    pub fn new(current_iteration: u32, convergence_mode: bool) -> Self {
+    pub fn new(current_iteration: u32) -> Self {
         // 0, 1, 4, 16, 64, 256, ...
         let nearest_lower_power_of_4 = match current_iteration {
             0 => 0,
@@ -180,22 +180,10 @@ impl DiscountParams {
         let pow_alpha = t_alpha * t_alpha.sqrt();
         let pow_gamma = (t_gamma / (t_gamma + 1.0)).powi(3);
 
-        // In convergence mode (exploitability < 1%):
-        // - Higher alpha_t floor (0.9) = more conservative positive regret updates
-        // - Higher beta_t (0.9 vs 0.5) = preserve negative regrets to prevent imbalance
-        // - Higher gamma_t floor (0.9) = more strategy retention
-        // This prevents oscillations/spikes when close to optimal solution
-        let (alpha_t, beta_t, gamma_t) = if convergence_mode {
-            let alpha = ((pow_alpha / (pow_alpha + 1.0)) as f32).max(0.9);
-            let beta = 0.9; // Preserve negative regrets (default is 0.5 which causes imbalance)
-            let gamma = (pow_gamma as f32).max(0.9);
-            (alpha, beta, gamma)
-        } else {
-            let alpha = (pow_alpha / (pow_alpha + 1.0)) as f32;
-            let beta = 0.5;
-            let gamma = pow_gamma as f32;
-            (alpha, beta, gamma)
-        };
+        // Pure DCFR discounting (no convergence mode overrides)
+        let alpha_t = (pow_alpha / (pow_alpha + 1.0)) as f32;
+        let beta_t = 0.5;
+        let gamma_t = pow_gamma as f32;
 
         Self {
             alpha_t,
@@ -233,10 +221,6 @@ pub fn solve<T: Game>(
     };
     #[cfg(feature = "logging")]
     let solve_start = Instant::now();
-    // Once exploitability drops below 1%, enter convergence mode
-    // This applies higher floors to alpha_t and gamma_t to prevent oscillations
-    let mut convergence_mode = false;
-
     if print_progress {
         print!("iteration: 0 / {max_num_iterations} ");
         if starting_pot > 0.0 {
@@ -270,41 +254,7 @@ pub fn solve<T: Game>(
             );
         }
 
-        // Once exploitability drops below 1.0%, enter convergence mode
-        // This applies min floors: alpha_t >= 0.9, gamma_t >= 0.9 to prevent spikes
-        let current_percent = exploitability / starting_pot * 100.0;
-        if starting_pot > 0.0 && current_percent < 1.0 {
-            if !convergence_mode {
-                #[cfg(feature = "logging")]
-                debug!(
-                    "[{:.2}s] iter={}: exploitability dropped below 1% ({:.4}%), entering CONVERGENCE MODE (alpha_t >= 0.9, gamma_t >= 0.9)",
-                    solve_start.elapsed().as_secs_f64(),
-                    t,
-                    current_percent
-                );
-            }
-            convergence_mode = true;
-        }
-        let params = DiscountParams::new(t, convergence_mode);
-
-        // Log parameters for every iteration in debug mode
-        #[cfg(feature = "logging")]
-        {
-            // Log at power-of-4, or every iteration in spike investigation window
-            let in_spike_window = t >= 165 && t <= 200;
-            if is_power_of_4 || in_spike_window {
-                debug!(
-                    "[{:.2}s] iter={}: convergence_mode={}, current_percent={:.4}%, alpha_t={:.6}, beta_t={:.6}, gamma_t={:.6}",
-                    solve_start.elapsed().as_secs_f64(),
-                    t,
-                    convergence_mode,
-                    current_percent,
-                    params.alpha_t,
-                    params.beta_t,
-                    params.gamma_t
-                );
-            }
-        }
+        let params = DiscountParams::new(t);
 
         // alternating updates
         if cfr_log_level() >= 1 && t < cfr_log_max_iters() {
@@ -446,7 +396,7 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration, false);
+    let params = DiscountParams::new(current_iteration);
 
     // alternating updates
     for player in 0..2 {
@@ -466,15 +416,14 @@ pub fn solve_step<T: Game>(game: &T, current_iteration: u32) {
 ///
 /// This enables per-player control needed for boundary pair recording:
 /// 1. Record boundary CFVs for player 0 (before any update)
-/// 2. Call `solve_step_for_player(game, t, 0, convergence_mode)` — updates player 0's regrets
+/// 2. Call `solve_step_for_player(game, t, 0)` — updates player 0's regrets
 /// 3. Record boundary CFVs for player 1 (after player 0's update)
-/// 4. Call `solve_step_for_player(game, t, 1, convergence_mode)` — updates player 1's regrets
+/// 4. Call `solve_step_for_player(game, t, 1)` — updates player 1's regrets
 #[inline]
 pub fn solve_step_for_player<T: Game>(
     game: &T,
     current_iteration: u32,
     player: usize,
-    convergence_mode: bool,
 ) {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -485,7 +434,7 @@ pub fn solve_step_for_player<T: Game>(
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration, convergence_mode);
+    let params = DiscountParams::new(current_iteration);
 
     let mut result = Vec::with_capacity(game.num_private_hands(player));
     solve_recursive(
@@ -507,7 +456,6 @@ pub fn solve_step_for_player_recording(
     game: &PostFlopGame,
     current_iteration: u32,
     player: usize,
-    convergence_mode: bool,
 ) -> Vec<Vec<f32>> {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -517,7 +465,7 @@ pub fn solve_step_for_player_recording(
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration, convergence_mode);
+    let params = DiscountParams::new(current_iteration);
     let mut result = Vec::with_capacity(game.num_private_hands(player));
     let mut boundaries = Vec::new();
     let mut boundary_cfreaches = Vec::new();
@@ -544,7 +492,6 @@ pub fn solve_step_for_player_recording_with_cfreach(
     game: &PostFlopGame,
     current_iteration: u32,
     player: usize,
-    convergence_mode: bool,
 ) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     if game.is_solved() {
         panic!("Game is already solved");
@@ -554,7 +501,7 @@ pub fn solve_step_for_player_recording_with_cfreach(
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration, convergence_mode);
+    let params = DiscountParams::new(current_iteration);
     let mut result = Vec::with_capacity(game.num_private_hands(player));
     let mut boundaries = Vec::new();
     let mut boundary_cfreaches = Vec::new();
@@ -580,7 +527,6 @@ pub fn solve_step_for_player_replay(
     game: &PostFlopGame,
     current_iteration: u32,
     player: usize,
-    convergence_mode: bool,
     boundary_cfvs: &[Vec<f32>],
 ) {
     if game.is_solved() {
@@ -591,7 +537,7 @@ pub fn solve_step_for_player_replay(
     }
 
     let mut root = game.root();
-    let params = DiscountParams::new(current_iteration, convergence_mode);
+    let params = DiscountParams::new(current_iteration);
     let mut result = Vec::with_capacity(game.num_private_hands(player));
     let mut boundary_counter = 0usize;
     solve_recursive_replay(

@@ -35,7 +35,6 @@ struct BoundaryPairsV2 {
 struct IterationData {
     _iteration: u32,
     _exploitability: f32,
-    convergence_mode: bool,
     /// boundary_cfvs[boundary_idx * 2 + player] = cfv vector
     boundary_cfvs: Vec<Vec<f32>>,
 }
@@ -73,7 +72,7 @@ impl BoundaryPairsV2 {
             f.read_exact(&mut buf4)?;
             let exploitability = f32::from_le_bytes(buf4);
             f.read_exact(&mut buf4)?;
-            let convergence_mode = u32::from_le_bytes(buf4) != 0;
+            let _reserved = u32::from_le_bytes(buf4);
 
             let mut boundary_cfvs = Vec::with_capacity(num_boundaries * 2);
             for _b in 0..num_boundaries {
@@ -94,7 +93,6 @@ impl BoundaryPairsV2 {
             iterations.push(IterationData {
                 _iteration: iteration,
                 _exploitability: exploitability,
-                convergence_mode,
                 boundary_cfvs,
             });
         }
@@ -111,9 +109,6 @@ impl BoundaryPairsV2 {
         &self.iterations[iteration].boundary_cfvs[boundary_idx * 2 + player]
     }
 
-    fn convergence_mode_at(&self, iteration: usize) -> bool {
-        self.iterations[iteration].convergence_mode
-    }
 }
 
 // =============================================================================
@@ -208,9 +203,6 @@ fn main() {
     let solve_start = Instant::now();
 
     for t in 0..max_iterations {
-        // Use the exact convergence_mode that was used during build
-        let convergence_mode = pairs.convergence_mode_at(t);
-
         for player in 0..2 {
             // Extract boundary CFVs for this iteration/player
             let boundary_cfvs: Vec<Vec<f32>> = (0..pairs.num_boundaries)
@@ -222,7 +214,6 @@ fn main() {
                 &game,
                 t as u32,
                 player,
-                convergence_mode,
                 &boundary_cfvs,
             );
         }
@@ -231,12 +222,11 @@ fn main() {
             let elapsed = solve_start.elapsed().as_secs_f64();
             let per_iter = elapsed / (t + 1) as f64;
             print!(
-                "\r  iteration: {} / {} ({:.2}s, {:.4}s/iter, conv_mode={})",
+                "\r  iteration: {} / {} ({:.2}s, {:.4}s/iter)",
                 t + 1,
                 max_iterations,
                 elapsed,
                 per_iter,
-                convergence_mode,
             );
             io::stdout().flush().unwrap();
         }

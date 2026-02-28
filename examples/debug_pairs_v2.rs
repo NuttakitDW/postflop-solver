@@ -210,7 +210,7 @@ struct DiscountParams {
 }
 
 impl DiscountParams {
-    fn new(t: u32, convergence_mode: bool) -> Self {
+    fn new(t: u32) -> Self {
         let nearest_lower_power_of_4 = match t {
             0 => 0,
             x => 1u32 << ((x.leading_zeros() ^ 31) & !1),
@@ -220,17 +220,9 @@ impl DiscountParams {
         let pow_alpha = t_alpha * t_alpha.sqrt();
         let pow_gamma = (t_gamma / (t_gamma + 1.0)).powi(3);
 
-        let (alpha_t, beta_t, gamma_t) = if convergence_mode {
-            let alpha = ((pow_alpha / (pow_alpha + 1.0)) as f32).max(0.9);
-            let beta = 0.9;
-            let gamma = (pow_gamma as f32).max(0.9);
-            (alpha, beta, gamma)
-        } else {
-            let alpha = (pow_alpha / (pow_alpha + 1.0)) as f32;
-            let beta = 0.5;
-            let gamma = pow_gamma as f32;
-            (alpha, beta, gamma)
-        };
+        let alpha_t = (pow_alpha / (pow_alpha + 1.0)) as f32;
+        let beta_t = 0.5;
+        let gamma_t = pow_gamma as f32;
 
         Self { alpha_t, beta_t, gamma_t }
     }
@@ -271,7 +263,6 @@ struct BoundaryPairsV2 {
 struct IterationData {
     _iteration: u32,
     _exploitability: f32,
-    convergence_mode: bool,
     boundary_cfvs: Vec<Vec<f32>>,
 }
 
@@ -304,7 +295,7 @@ impl BoundaryPairsV2 {
             f.read_exact(&mut buf4)?;
             let exploitability = f32::from_le_bytes(buf4);
             f.read_exact(&mut buf4)?;
-            let convergence_mode = u32::from_le_bytes(buf4) != 0;
+            let _reserved = u32::from_le_bytes(buf4);
             let mut boundary_cfvs = Vec::with_capacity(num_boundaries * 2);
             for _b in 0..num_boundaries {
                 for player in 0..2 {
@@ -320,7 +311,6 @@ impl BoundaryPairsV2 {
             iterations.push(IterationData {
                 _iteration: iteration,
                 _exploitability: exploitability,
-                convergence_mode,
                 boundary_cfvs,
             });
         }
@@ -543,8 +533,7 @@ fn main() {
     println!();
 
     for t in 0..max_iters {
-        let convergence_mode = pairs.iterations[t].convergence_mode;
-        let params = DiscountParams::new(t as u32, convergence_mode);
+        let params = DiscountParams::new(t as u32);
 
         // === Player 0 ===
         // Step 1: Check P0 boundary CFVs (build game is in correct pre-P0 state)
@@ -573,7 +562,7 @@ fn main() {
         }
 
         // Step 3: Run library solve for P0 on build game (update all P0 regrets)
-        solve_step_for_player(&game, t as u32, 0, convergence_mode);
+        solve_step_for_player(&game, t as u32, 0);
 
         // Compare root regrets after P0 updates
         {
@@ -618,7 +607,7 @@ fn main() {
         }
 
         // Step 6: Run library solve for P1 on build game
-        solve_step_for_player(&game, t as u32, 1, convergence_mode);
+        solve_step_for_player(&game, t as u32, 1);
 
         // Compare root regrets after both players
         {
