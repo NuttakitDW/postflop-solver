@@ -216,9 +216,10 @@ fn main() {
     game.allocate_memory(false);
     println!();
 
-    // Solve — use the number of iterations the model was trained on
-    let max_iterations = model.meta.num_iterations;
-    println!("Solving ({} iterations with NN model, from training data)...", max_iterations);
+    // Solve — use iterations from config (can exceed training data iterations)
+    let max_iterations = config.solver.max_iterations as usize;
+    println!("Solving ({} iterations with NN model, trained on {} iters)...",
+        max_iterations, model.meta.num_iterations);
     let solve_start = Instant::now();
 
     for t in 0..max_iterations {

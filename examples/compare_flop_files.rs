@@ -13,16 +13,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("Loading {}...", args[1]);
+    println!("Loading files...");
     let (g1, m1): (PostFlopGame, String) =
         load_data_from_file(&args[1], None).expect("Failed to load file1");
-    println!("  memo: {}, OOP={}, IP={}", m1, g1.num_private_hands(0), g1.num_private_hands(1));
-
-    println!("Loading {}...", args[2]);
     let (g2, m2): (PostFlopGame, String) =
         load_data_from_file(&args[2], None).expect("Failed to load file2");
-    println!("  memo: {}, OOP={}, IP={}", m2, g2.num_private_hands(0), g2.num_private_hands(1));
-    println!();
 
     let nh = [g1.num_private_hands(0), g1.num_private_hands(1)];
     let pc = [g1.private_cards(0).to_vec(), g1.private_cards(1).to_vec()];
@@ -33,18 +28,21 @@ fn main() {
     let mut r2 = g2.root();
     walk(&g1, &g2, &mut r1, &mut r2, &mut stats);
 
-    println!("=== Full Flop Tree ===");
-    println!("  Nodes: {}", stats.nodes);
-    println!("  Elements: {}", stats.elements);
-    println!("  Avg diff: {:.6}", stats.sum_diff / stats.elements as f64);
-    println!("  Max diff: {:.6}", stats.max_diff);
-    println!("  >1%: {} ({:.2}%)", stats.gt_1, stats.gt_1 as f64 / stats.elements as f64 * 100.0);
-    println!("  >5%: {} ({:.2}%)", stats.gt_5, stats.gt_5 as f64 / stats.elements as f64 * 100.0);
-    println!("  >10%: {} ({:.2}%)", stats.gt_10, stats.gt_10 as f64 / stats.elements as f64 * 100.0);
+    let avg_diff_pct = stats.sum_diff / stats.elements as f64 * 100.0;
+
     println!();
+    println!("=== Comparison: {} vs {} ===", m1, m2);
+    println!();
+    println!("  Full tree avg diff:  {:.2}%", avg_diff_pct);
+    println!("  Nodes: {},  Elements: {}", stats.nodes, stats.elements);
+    println!("  >10% diff: {:.1}%  |  >5%: {:.1}%  |  >1%: {:.1}%",
+        stats.gt_10 as f64 / stats.elements as f64 * 100.0,
+        stats.gt_5 as f64 / stats.elements as f64 * 100.0,
+        stats.gt_1 as f64 / stats.elements as f64 * 100.0);
 
     // Root node detail
-    println!("=== OOP Root Strategy ===");
+    println!();
+    println!("=== Root Strategy (OOP) ===");
     let r1 = g1.root();
     let r2 = g2.root();
     let na = r1.num_actions();
@@ -61,46 +59,54 @@ fn main() {
         _ => format!("{:?}", a),
     }).collect();
 
-    // Top 30 hands by diff
-    let mut diffs: Vec<(usize, f32, f32, f32)> = Vec::new(); // (hand_idx, diff, s1_check, s2_check)
+    // Root avg diff
+    let mut root_sum = 0.0f64;
+    let root_elements = na * nh[0];
+    for a in 0..na {
+        for h in 0..nh[0] {
+            root_sum += (s1[a * nh[0] + h] - s2[a * nh[0] + h]).abs() as f64;
+        }
+    }
+    println!("  Root avg diff: {:.2}%", root_sum / root_elements as f64 * 100.0);
+
+    // Per-action avg diff
+    print!("  Per action:  ");
+    for a in 0..na {
+        let mut sum = 0.0f64;
+        for h in 0..nh[0] {
+            sum += (s1[a * nh[0] + h] - s2[a * nh[0] + h]).abs() as f64;
+        }
+        let sep = if a + 1 < na { "  |  " } else { "" };
+        print!("{}: {:.2}%{}", actions[a], sum / nh[0] as f64 * 100.0, sep);
+    }
+    println!();
+
+    // Top 10 worst hands
+    let mut diffs: Vec<(usize, f32)> = Vec::new();
     for h in 0..nh[0] {
         let mut max_d = 0.0f32;
         for a in 0..na {
             let d = (s1[a * nh[0] + h] - s2[a * nh[0] + h]).abs();
             if d > max_d { max_d = d; }
         }
-        diffs.push((h, max_d, s1[h], s2[h])); // s1[h] = check freq file1
+        diffs.push((h, max_d));
     }
     diffs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    println!("Actions: {:?}", actions);
     println!();
-    println!("Top 30 hands by max action difference:");
-    println!("{:<8} {:>8} | {}", "Hand", "MaxDiff", actions.iter().map(|a| format!("{:>8} {:>8}", format!("{}(1)", a), format!("{}(2)", a))).collect::<Vec<_>>().join(" | "));
-    println!("{}", "-".repeat(12 + actions.len() * 20));
-
-    for &(h, max_d, _, _) in diffs.iter().take(30) {
+    println!("  Top 10 worst hands:");
+    for &(h, max_d) in diffs.iter().take(10) {
         let (c1, c2) = pc[0][h];
         let hand = format!("{}{}", card_str(c1), card_str(c2));
-        let mut cols = Vec::new();
+        let mut parts = Vec::new();
         for a in 0..na {
-            let v1 = s1[a * nh[0] + h];
-            let v2 = s2[a * nh[0] + h];
-            cols.push(format!("{:>7.1}% {:>7.1}%", v1 * 100.0, v2 * 100.0));
+            let v1 = s1[a * nh[0] + h] * 100.0;
+            let v2 = s2[a * nh[0] + h] * 100.0;
+            parts.push(format!("{}: {:.0}%→{:.0}%", actions[a], v1, v2));
         }
-        println!("{:<8} {:>7.1}% | {}", hand, max_d * 100.0, cols.join(" | "));
+        println!("    {:<6} {:>5.1}% diff  ({})", hand, max_d * 100.0, parts.join(", "));
     }
-
-    // Summary: avg diff by action
     println!();
-    println!("Average diff per action:");
-    for a in 0..na {
-        let mut sum = 0.0f64;
-        for h in 0..nh[0] {
-            sum += (s1[a * nh[0] + h] - s2[a * nh[0] + h]).abs() as f64;
-        }
-        println!("  {}: {:.4}%", actions[a], sum / nh[0] as f64 * 100.0);
-    }
 }
 
 #[derive(Default)]

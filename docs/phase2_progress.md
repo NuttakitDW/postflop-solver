@@ -322,4 +322,104 @@ The lookup table avoids this entirely because it's indexed by iteration number �
 
 ---
 
-**Next steps**: Bucketing (K-dim output) for multi-board generalization — same principle as solver indexing (no wasted zeros) but board-agnostic.
+## Experiment 6: Replacing Boundary One-Hot with (pot, stack) for Generalization (2025-03-01)
+
+**Goal**: Enable one model to handle different flop bet size configurations without retraining. Turn/river bet sizes are fixed (abstraction). If we change flop bet sizes, different boundaries exist — but boundaries sharing the same (pot, stack) should have identical turn/river subtrees.
+
+**Hypothesis**: Replace boundary one-hot encoding (config-specific, 25 dims) with continuous (pot_norm, stack_norm) features (2 dims, generalizable). Normalization: `pot / max_pot`, `stack / max_pot` where `max_pot = starting_pot + 2 * effective_stack`.
+
+**Changes**:
+- `trainings/train_bt1.py`: Input changed from `[boundary_onehot(25), player(1), cfreach(860)] = 886 dims` to `[pot_norm(1), stack_norm(1), player(1), cfreach(860)] = 863 dims`
+- `examples/solve_with_model_v1/main.rs`: Updated to read `max_pot` from meta.json, use `collect_boundary_pot_stack()` and build input with `(pot_norm, stack_norm)` instead of boundary one-hot
+- `src/solver.rs`: Added `collect_boundary_pot_stack()` function
+- `examples/dump_boundaries.rs`: Added stack info to JSON output
+- `data/bt1/KcQh7s_boundaries.json`: Generated boundary pot/stack metadata
+
+**Training result**: Identical to one-hot — RMSE 0.0006 chips, same training accuracy.
+
+**Solver result**: Significantly worse.
+
+| Metric | One-hot (working) | Pot/stack |
+|--------|-------------------|-----------|
+| Training RMSE | 0.0006 chips | 0.0006 chips |
+| Root avg diff (Check) | 0.60% | **9.7%** |
+| Root avg diff (Bet18) | 0.57% | **9.0%** |
+| Root avg diff (AllIn) | 0.04% | **0.7%** |
+| Full tree avg diff | 13.6% | **18.0%** |
+| Full tree >10% | ~30% | **39.2%** |
+
+**Root cause**: KcQh7s has 25 boundaries but only 10 unique (pot, stack) pairs. **13 boundaries share (pot=415, stack=0)** — all the all-in action paths. With one-hot, the model could learn distinct CFV mappings for each. With (pot, stack), these 13 boundaries are indistinguishable (same input features except cfreach), forcing the model to produce the same output for the same cfreach.
+
+Theoretically, boundaries with the same (pot, stack) SHOULD have the same CFV for the same cfreach (identical turn/river subtree). But in practice, the reduced discriminative power of 2 continuous features vs 25 one-hot features compounds through the feedback loop, producing larger trajectory divergence.
+
+**Conclusion**: The (pot, stack) encoding loses too much boundary-specific information for the feedback loop to stay stable. Generalization across flop configs needs a different approach — perhaps combining (pot, stack) with additional structural features, or training on multi-config data where the diversity helps the model learn the true underlying mapping.
+
+---
+
+---
+
+## Experiment 7: Iter-Only Model — Testing NN Precision Limits (2025-03-01)
+
+**Hypothesis**: The 13.6% full tree diff comes from cfreach feedback loop compounding. If we remove cfreach entirely and use only `(boundary, player, iteration)` as input, the model becomes a pure lookup table with no feedback loop — it should produce ~0% diff if it memorizes perfectly.
+
+**Setup**: Input = `[boundary_onehot(25), player(1), iteration_onehot(180)] = 206 dims`. No cfreach input. Code: `trainings/train_bt1_iteronly.py`, `examples/solve_with_model_iteronly/`.
+
+**Key discovery**: Iteration encoding matters hugely for memorization.
+
+| Encoding | Model Size | RMSE (chips) | Full Tree Diff |
+|----------|-----------|-------------|----------------|
+| iter_norm (continuous), H=500 | 2M params | 0.0028 | 14.85% |
+| iter_norm, H=1500 (Ranger+EMA) | 15M params | 0.0012 | 12.09% |
+| iter_norm, H=1500 (Adam full-batch) | 15M params | 0.0042 | not tested |
+| **iter_onehot, H=1500 (Ranger+EMA)** | **15M params** | **0.000195** | **10.56%** |
+| dpairs2 (exact float32 lookup) | N/A | 0.000000 | 0.0002% |
+
+Iteration one-hot gave 6x better RMSE than continuous iter_norm (0.000195 vs 0.0012). The network can distinguish 180 discrete iterations much better when they're categorically encoded.
+
+**ONNX verification (best model)**:
+- OOP: mean_err=0.000087, max_err=0.000554, p99=0.000310 chips
+- IP: mean_err=0.000131, max_err=0.000829, p99=0.000411 chips
+
+**Result**: Even with near-perfect memorization (0.000087 chips mean error), full tree diff is still 10.56%.
+
+**Root cause: DCFR regret matching hypersensitivity.** Near equilibrium, many actions have cumulative regrets close to zero. Strategy is computed via regret matching: `strategy[a] = max(0, cumR[a]) / Σ max(0, cumR)`. Even a 0.0001 chip error per iteration, compounded over 180 iterations, can flip the sign of a cumulative regret (e.g., +0.001 → -0.001), changing that action from a small positive probability to exactly 0%.
+
+The gap between NN (10.56%) and float32 lookup (0.0002%) is not closable — neural networks fundamentally cannot achieve float32-exact precision across 6.1M output values.
+
+**Conclusion**: NN precision alone cannot eliminate the tree diff. The ~10-14% full tree diff is a **fundamental limit** of approximate boundary CFV methods with DCFR. Future work needs either:
+1. Accept approximate strategies (the root strategy is already excellent at 0.2% diff)
+2. Make the solver robust to CFV noise (modified regret matching, averaging, etc.)
+3. Focus on multi-board generalization rather than single-board perfection
+
+---
+
+## Experiment 7b: Adding Iteration One-Hot to cfreach Model (2025-03-01)
+
+**Hypothesis**: Since iteration one-hot dramatically improved the iter-only model, adding it to the cfreach model should help too — the model would know which iteration it's predicting for, making the cfreach→CFV mapping easier.
+
+**Changes**: Input becomes `[boundary_onehot(25), player(1), iter_onehot(180), cfreach(860)] = 1066 dims`.
+
+**Training result**: Same RMSE (0.0006 chips) — iteration info doesn't improve training fit when cfreach is already present.
+
+**Solver result**: Catastrophically worse.
+
+| Metric | cfreach only | cfreach + iter_onehot |
+|--------|-------------|----------------------|
+| Root avg diff | 0.6% | **56.2%** |
+| Full tree avg diff | 13.6% | **24.6%** |
+| Root max diff | 5.0% | **99.1%** |
+
+**Root cause: Overfitting to the training trajectory.** With iteration one-hot, the model learns: "at iteration 37, with THIS exact cfreach → predict THIS exact CFV." During solving, cfreach drifts from training data (feedback loop), but the iteration index stays correct. The model sees the "right" iteration but "wrong" cfreach — a contradiction it never saw in training. Without iteration info, the model learns a more general cfreach→CFV mapping that tolerates cfreach drift better.
+
+**Key insight**: Iteration info helps **memorization** (iter-only model) but hurts **generalization** (cfreach model in a feedback loop). This is consistent with Experiment 4 (iter_norm also hurt).
+
+**Conclusion**: Reverted. The cfreach model must NOT include iteration information — it needs to generalize to drifted cfreaches, not memorize the training trajectory.
+
+---
+
+**Current best result (Experiment 3)**: 0.6% root avg diff, 13.6% full tree avg diff.
+
+**Next steps**:
+- Multi-trajectory training (DAgger-style) to improve cfreach model's robustness to distribution shift
+- Accept ~10-14% tree diff as inherent to approximate CFV methods — focus on multi-board generalization
+- Investigate modified DCFR variants that are less sensitive to boundary CFV noise

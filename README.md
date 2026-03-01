@@ -9,6 +9,9 @@ python trainings/train_bt1.py
 export ORT_DYLIB_PATH=/opt/homebrew/lib/python3.14/site-packages/onnxruntime/capi/libonnxruntime.1.24.1.dylib
 cargo run --example solve_with_model_v1 --release --features "bincode rayon" -- config/KcQh7s.json models/bt1_KcQh7s
 
+# compare script
+cargo run --example compare_flop_files --release --features "bincode rayon" -- data/out/dpair2/KcQh7s-standard.flop data/out/KcQh7s-model-v1.flop 
+
 # output file path
 bt1 = data/bt1
 model = models/bt1_KcQh7s
