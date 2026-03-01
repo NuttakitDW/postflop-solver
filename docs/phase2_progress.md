@@ -208,24 +208,48 @@ Isolated the error sources by comparing three solutions:
 
 **Finding: 100% of the 13.6% diff comes from model prediction error compounding through the tree.** The iteration count mismatch (180 vs 200) contributes zero error — pairs2 (perfect CFVs, 180 iters) is byte-identical to standard (200 iters).
 
-### Why 0.0006 RMSE compounds to 13.6%
+### Verification: bt1 data is correct
 
-The root node is shielded (only 0.6% avg diff) because it averages over many downstream paths. But deeper decision nodes closer to boundaries are hit harder:
+Created `solve_with_bt1` — replays bt1's CFVs directly (ignoring cfreach and the model), like pairs_v2 does with dpairs2. Result: **byte-identical to standard solve**. The bt1 recording pipeline is correct.
 
-1. Small CFV prediction error → slightly wrong regret update at a node
-2. Wrong regret → wrong strategy → different cfreach next iteration
-3. Different cfreach = out-of-distribution input for model → worse prediction
-4. Error compounds over 180 iterations
-5. Deep nodes have fewer paths averaging out errors → higher sensitivity
+### Verification: cfreach matches perfectly between bt1 and inference
 
-The model was trained on a **single trajectory** (9,000 samples). Once inference diverges even slightly, the model sees cfreach values it never trained on.
+Created `debug_bt1_vs_inference` — stays on the training trajectory (using bt1's true CFVs for replay) while comparing:
+1. cfreach from `collect_boundary_cfreaches` vs bt1's recorded cfreach
+2. Model predictions vs bt1's true CFVs
 
-### Possible improvements
+**cfreach matches at ALL iterations (0.00000000 diff).** The input pipeline is correct.
+
+### Finding: Model prediction error is non-uniform across iterations
+
+The model's 0.0006 RMSE is an average. Per-iteration breakdown on the training trajectory:
+
+| Iteration | Player | Mean Error | Max Error | RMSE |
+|---|---|---|---|---|
+| 0 | IP | 0.001143 | **0.024** chips | 0.002494 |
+| 2 | IP | 0.001456 | **0.043** chips | 0.002693 |
+| 10 | IP | 0.001218 | 0.006 chips | 0.001566 |
+| 50 | IP | 0.000448 | 0.004 chips | 0.000668 |
+| 179 | IP | 0.000306 | 0.002 chips | 0.000401 |
+
+Early iterations (0-10) have 10-20x worse max errors than late iterations. These are exactly where DCFR strategies are most volatile — errors here compound through the rest of the solve.
+
+### Why early iterations are harder to fit
+
+Early DCFR iterations have wildly fluctuating CFV values because strategies are unstable (alpha ≈ 0, regrets barely carry over). Late iterations converge and have smooth, predictable CFVs. The model spreads its capacity uniformly across all 9,000 samples, under-fitting the noisy early iterations.
+
+### Attempted fix: Iteration-weighted loss (failed)
+
+Weighted the training loss by DCFR's gamma discount `t/(t+1)` — giving low weight to early iterations (which DCFR discounts anyway) and high weight to late iterations (where accuracy matters most). Result: worse solver output.
+
+The idea was sound (DCFR does discount early iterations) but the model still needs reasonable predictions at early iterations to avoid trajectory divergence during inference. Under-fitting early iterations makes the compounding worse, not better.
+
+### Remaining ideas
 
 1. **Multi-trajectory training (DAgger-style)** — run multiple solves with perturbed strategies, collect diverse (cfreach, CFV) pairs so the model handles OOD inputs
 2. **More training data** — run with more iterations (e.g. 500+) to get more samples near convergence
 3. **Run more iterations at inference** — let DCFR self-correct beyond the 180 training iterations
-4. **Better model fit** — reduce 0.0006 RMSE further
+4. **Better model fit** — reduce early-iteration errors specifically (e.g. larger model, curriculum learning)
 
 ---
 
@@ -243,6 +267,58 @@ The training loss curve shows an unusual spike around epoch 360/500 — loss jum
 **Current status**: Reverted to original code with both Ranger21 + OneCycleLR. Despite the ugly spike, this configuration produces the best solver results (0.6% root avg diff, 13.6% full tree). The spike remains unexplained in terms of why the conflicting schedulers produce better results than either one alone.
 
 **Remains to investigate.**
+
+---
+
+## Experiment 4: Adding Iteration Number as Model Input (2025-03-01)
+
+**Hypothesis**: The lookup table is indexed by `(iteration, boundary, player)` while the model only sees `(boundary, player, cfreach)`. Adding normalized iteration number (t / max_t → [0,1]) as an input feature should help the model distinguish early vs late iterations and predict iteration-appropriate CFVs.
+
+**Changes**: Input becomes `[boundary_onehot(25), player(1), iter_norm(1), cfreach(860)] = 887 dims`.
+
+**Result**: Made things worse.
+
+**Why it failed**: Adding iteration number makes the model memorize the exact training trajectory even harder — it learns "at iteration 42, boundary 7, the CFV should be exactly X." During inference, the first tiny prediction error causes strategy drift, so by iteration 43 the cfreach is slightly different from training. The model now sees the "right" iteration but "wrong" cfreach — a contradiction it never encountered in training. This makes predictions less stable, not more.
+
+Without iteration number, the model at least tries to learn a general `cfreach → CFV` mapping that has some robustness to drift. With iteration number, it anchors to the specific trajectory and becomes MORE brittle to any deviation.
+
+**Key insight**: The problem is not missing features — it's that the model operates in a closed-loop feedback system where its own errors change its future inputs. Adding more features that overfit to the training trajectory makes the distribution shift problem worse, not better.
+
+---
+
+## Experiment 5: Removing Regularization for True Memorization (2025-03-01)
+
+**Hypothesis**: The model's 0.0006 RMSE isn't zero — it still has max errors of 0.024-0.043 chips at early iterations. The training recipe (weight decay, EMA, Ranger21, OneCycleLR) actively prevents perfect memorization. If we remove all regularization, the model should achieve near-zero training error and produce solver results matching the lookup table.
+
+**Changes** (train_bt1_overfit.py):
+- Adam optimizer (no built-in regularization) instead of Ranger21
+- Weight decay = 0 (was 1e-4)
+- Raw weights saved (no EMA smoothing)
+- MSE loss (was Huber — stronger gradient signal)
+- ReduceLROnPlateau (was OneCycleLR — keeps LR high until stuck)
+- Up to 2000 epochs with early stopping
+
+**Training result**: RMSE dropped from 0.0006 to **0.000313 chips** — better training fit.
+
+**Solver result**: Catastrophically worse.
+
+| Metric | Regularized (EMA) | Overfit (no reg) |
+|--------|-------------------|------------------|
+| Training RMSE | 0.0006 chips | **0.000313 chips** |
+| Root avg diff | **0.6%** | 42.2% |
+| Full tree avg diff | **13.6%** | 19.1% |
+| Root max diff | 5.0% | 99.3% |
+
+The overfit model memorized training data better but produced completely wrong strategies — most JT combos at 95-99% diff.
+
+**Root cause: NOT underfitting.** The regularized model's smoothness is actually essential:
+
+- **Smooth model** (EMA + weight decay): small cfreach perturbation → small CFV change → trajectory stays close
+- **Sharp model** (no regularization): small cfreach perturbation → large CFV change → trajectory diverges immediately
+
+The lookup table avoids this entirely because it's indexed by iteration number — cfreach perturbations have zero effect on its output. The NN uses cfreach as input, so it's inherently sensitive to perturbations. Regularization limits that sensitivity.
+
+**Key finding**: The 0.6% root / 13.6% full tree diff with the regularized model is likely near the best achievable for single-trajectory cfreach→CFV mapping. The remaining error comes from the fundamental sensitivity of the feedback loop to cfreach-dependent predictions, not from model capacity or training quality.
 
 ---
 
