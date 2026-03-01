@@ -417,9 +417,33 @@ The gap between NN (10.56%) and float32 lookup (0.0002%) is not closable — neu
 
 ---
 
+## Experiment 8: DAgger — Multi-Trajectory Training (2025-03-01)
+
+**Hypothesis**: The model fails on out-of-distribution cfreaches caused by its own prediction errors. DAgger (Dataset Aggregation) generates training data on the model's own drifted trajectory: run the full solver with model-predicted CFVs driving flop regrets, while recording the TRUE CFVs from turn/river subtree traversal. The model learns to handle the exact distribution shift it causes.
+
+**Implementation**:
+- New solver function `solve_step_for_player_dagger`: at boundary nodes, traverses turn/river subtree normally (true CFVs, updates subtree regrets), records `(drifted_cfreach, true_cfv)`, but returns model-predicted CFV to parent for flop regret updates.
+- `build_bt1_dagger` example: runs 200 DAgger iterations with full game tree (~25 min, 14.4 GB memory), outputs `KcQh7s_dagger.bt1` (52 MB).
+- `train_bt1_dagger.py`: trains on combined original (180 iters) + DAgger (200 iters) = 19,000 samples.
+
+**Training**: RMSE = 0.0005 chips (slightly better than original 0.0006).
+
+**Result**: Full tree marginally better, root strategy much worse.
+
+| Metric | Original (Exp 3) | DAgger |
+|--------|------------------|--------|
+| Full tree avg diff | 14.56% | **13.21%** |
+| Root avg diff | **0.76%** | 9.05% |
+| Root worst hand | 50% (9sQc) | 90.8% (3cJc) |
+
+**Root cause**: Single-round DAgger is insufficient. The DAgger data teaches the model to handle trajectory A's drift, but the retrained model produces a THIRD trajectory (different from both original and DAgger). The model compromises between two very different cfreach distributions and performs worse on both — especially at the root where the original model was already accurate.
+
+**Conclusion**: DAgger requires multiple rounds to converge (train → generate → retrain → repeat). A single round makes things worse by confusing the model between two incompatible distributions. The approach is theoretically sound but practically expensive (~25 min per round of full-tree solve) and may still not converge.
+
+---
+
 **Current best result (Experiment 3)**: 0.6% root avg diff, 13.6% full tree avg diff.
 
 **Next steps**:
-- Multi-trajectory training (DAgger-style) to improve cfreach model's robustness to distribution shift
 - Accept ~10-14% tree diff as inherent to approximate CFV methods — focus on multi-board generalization
 - Investigate modified DCFR variants that are less sensitive to boundary CFV noise
