@@ -1,4 +1,6 @@
 /target
+/pyo3-bridge/target
+/pyo3-bridge/Cargo.lock
 Cargo.lock
 
 # Keep config/*.json tracked
