@@ -2,19 +2,23 @@
 """
 train_bt2.py — Train NN on .bt2 boundary data with (pot, stack) features.
 
-Unlike train_bt1.py which uses boundary one-hot encoding (tied to a specific
-tree structure), this uses continuous (pot_norm, stack_norm) features.
-This makes the model generalizable across different flop bet sizes.
+Uses continuous (pot_norm, stack_norm) features instead of boundary one-hot,
+making the model generalizable across different flop bet sizes.
 
-Loads multiple .bt2 files (from different flop bet configs) and pools all
-training data together.
+All cfreach/CFV data is expanded to the universal 1326-dim card-pair index
+space (C(52,2)). Every position always maps to the same two-card combo
+regardless of player. Hands not in range or blocked by board are 0.
 
-Input:  [pot_norm(1), stack_norm(1), player(1), cfreach_padded(max_hands)]
-Output: [cfv_padded(max_hands)]  — masked loss on valid positions only.
+Index mapping: card_pair_to_index(c1, c2) = c1*(101-c1)//2 + c2 - 1  (c1 < c2)
+
+Input:  [pot_norm(1), stack_norm(1), player(1), cfreach(1326)]  = 1329 dims
+Output: [cfv(1326)]  — masked loss on positions in the player's range only.
+
+Requires hand mapping file: data/bt1/<board>_hands.json
 
 Usage:
-  python trainings/train_bt2.py data/bt2/KcQh7s_f1.bt2 data/bt2/KcQh7s_f2.bt2 ...
   python trainings/train_bt2.py data/bt2/KcQh7s_f*.bt2
+  python trainings/train_bt2.py --hands data/bt1/KcQh7s_hands.json data/bt2/KcQh7s_f*.bt2
 """
 
 import struct, json, os, csv, sys, time, glob
@@ -29,6 +33,7 @@ import matplotlib.pyplot as plt
 # -------- constants --------
 BASE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(BASE, "..")
+FULL_HANDS = 1326  # C(52, 2)
 
 # -------- hyper-parameters (following train_bt1.py) --------
 RNG_SEED = 42
@@ -41,6 +46,28 @@ LAYERS = 7
 CLIP = 5.0
 EMA_DECAY = 0.999
 HUBER_DELTA = 1.0
+
+# -------- card pair index (same formula as Rust solver) --------
+def card_pair_to_index(card1, card2):
+    """Map two card IDs to the universal 0..1325 index. card1 < card2."""
+    c1, c2 = min(card1, card2), max(card1, card2)
+    return c1 * (101 - c1) // 2 + c2 - 1
+
+def load_hand_indices(hands_path, num_oop, num_ip):
+    """Load hand mapping and compute solver_idx → card_pair_idx for each player."""
+    with open(hands_path) as f:
+        hands = json.load(f)
+
+    oop_cards = hands["oop"]
+    ip_cards = hands["ip"]
+    assert len(oop_cards) == num_oop, f"OOP hands mismatch: {len(oop_cards)} vs {num_oop}"
+    assert len(ip_cards) == num_ip, f"IP hands mismatch: {len(ip_cards)} vs {num_ip}"
+
+    # solver hand index → card_pair_to_index position in 1326-dim space
+    oop_indices = np.array([card_pair_to_index(c[0], c[1]) for c in oop_cards], dtype=np.int64)
+    ip_indices = np.array([card_pair_to_index(c[0], c[1]) for c in ip_cards], dtype=np.int64)
+
+    return oop_indices, ip_indices
 
 # -------- .bt2 loader --------
 def load_bt2(path):
@@ -96,16 +123,15 @@ def load_bt2(path):
         "boundary_stacks": boundary_stacks,
     }
 
-# -------- build dataset --------
-def build_dataset(all_data):
-    """Build dataset from multiple .bt2 files using (pot, stack) features."""
-    # Verify all files share the same board (same num_oop, num_ip, starting_pot, effective_stack)
+# -------- build dataset with 1326-dim expansion --------
+def build_dataset(all_data, oop_indices, ip_indices):
+    """Build dataset expanding per-hand data to universal 1326-dim space."""
     ref = all_data[0]
     num_oop = ref["num_oop"]
     num_ip = ref["num_ip"]
     starting_pot = ref["starting_pot"]
     effective_stack = ref["effective_stack"]
-    max_pot = starting_pot + 2 * effective_stack  # normalization constant
+    max_pot = starting_pot + 2 * effective_stack
 
     for i, d in enumerate(all_data):
         assert d["num_oop"] == num_oop, f"File {i}: num_oop mismatch {d['num_oop']} vs {num_oop}"
@@ -113,10 +139,19 @@ def build_dataset(all_data):
         assert d["starting_pot"] == starting_pot, f"File {i}: starting_pot mismatch"
         assert d["effective_stack"] == effective_stack, f"File {i}: effective_stack mismatch"
 
-    max_hands = max(num_oop, num_ip)
-    num_hands = [num_oop, num_ip]
-    in_dim = 3 + max_hands   # pot_norm + stack_norm + player + cfreach
-    out_dim = max_hands
+    in_dim = 3 + FULL_HANDS   # pot_norm + stack_norm + player + cfreach(1326)
+    out_dim = FULL_HANDS
+
+    # player → (opponent_indices, player_indices)
+    player_indices = [oop_indices, ip_indices]
+    opponent_indices = [ip_indices, oop_indices]
+
+    # Precompute masks (which 1326 positions are valid for each player)
+    player_masks = []
+    for p in range(2):
+        mask = np.zeros(FULL_HANDS, dtype=np.float32)
+        mask[player_indices[p]] = 1.0
+        player_masks.append(mask)
 
     inputs, targets, masks = [], [], []
 
@@ -132,31 +167,29 @@ def build_dataset(all_data):
 
                 for player in range(2):
                     cfv_solver, cfreach_solver = boundaries[b][player]
-                    n_player = num_hands[player]
 
-                    # Input: pot_norm + stack_norm + player + cfreach (padded)
+                    # Expand cfreach to 1326-dim (opponent's reach)
+                    cfreach_full = np.zeros(FULL_HANDS, dtype=np.float32)
+                    cfreach_full[opponent_indices[player]] = cfreach_solver
+
+                    # Expand CFV to 1326-dim (player's value)
+                    cfv_full = np.zeros(FULL_HANDS, dtype=np.float32)
+                    cfv_full[player_indices[player]] = cfv_solver
+
+                    # Input: [pot_norm, stack_norm, player, cfreach_full]
                     inp = np.zeros(in_dim, dtype=np.float32)
                     inp[0] = pot_norm
                     inp[1] = stack_norm
                     inp[2] = float(player)
-                    inp[3:3 + len(cfreach_solver)] = cfreach_solver
-
-                    # Target: cfv (padded)
-                    tgt = np.zeros(out_dim, dtype=np.float32)
-                    tgt[:n_player] = cfv_solver
-
-                    # Mask: 1 for valid positions
-                    msk = np.zeros(out_dim, dtype=np.float32)
-                    msk[:n_player] = 1.0
+                    inp[3:] = cfreach_full
 
                     inputs.append(inp)
-                    targets.append(tgt)
-                    masks.append(msk)
+                    targets.append(cfv_full)
+                    masks.append(player_masks[player])
 
     return np.array(inputs), np.array(targets), np.array(masks), {
         "num_oop": num_oop,
         "num_ip": num_ip,
-        "max_hands": max_hands,
         "starting_pot": starting_pot,
         "effective_stack": effective_stack,
         "max_pot": max_pot,
@@ -218,13 +251,25 @@ def save_loss_plot(train_hist, path):
 # -------- main --------
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python trainings/train_bt2.py <file1.bt2> [file2.bt2] ...")
+        print("Usage: python trainings/train_bt2.py [--hands <hands.json>] <file1.bt2> [file2.bt2] ...")
         print("       python trainings/train_bt2.py data/bt2/KcQh7s_f*.bt2")
         sys.exit(1)
 
+    # Parse args
+    hands_path = None
+    bt2_args = []
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == "--hands" and i + 1 < len(sys.argv):
+            hands_path = sys.argv[i + 1]
+            i += 2
+        else:
+            bt2_args.append(sys.argv[i])
+            i += 1
+
     # Expand glob patterns
     bt2_paths = []
-    for arg in sys.argv[1:]:
+    for arg in bt2_args:
         expanded = sorted(glob.glob(arg))
         if expanded:
             bt2_paths.extend(expanded)
@@ -241,8 +286,21 @@ def main():
             unique_paths.append(p)
     bt2_paths = unique_paths
 
+    if not bt2_paths:
+        print("No bt2 files specified")
+        sys.exit(1)
+
     # Derive board name from first file
     board = os.path.basename(bt2_paths[0]).split("_")[0].replace(".bt2", "")
+
+    # Auto-detect hands file
+    if hands_path is None:
+        hands_path = os.path.join(ROOT, "data", "bt1", f"{board}_hands.json")
+    if not os.path.exists(hands_path):
+        print(f"Error: Hand mapping file not found: {hands_path}")
+        print(f"Generate it with: cargo run --example dump_hands --release --features \"bincode rayon\" -- config/{board}.json")
+        sys.exit(1)
+
     OUT_DIR = os.path.join(ROOT, "models", f"bt2_{board}")
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -275,12 +333,11 @@ def main():
     ref = all_data[0]
     num_oop = ref["num_oop"]
     num_ip = ref["num_ip"]
-    max_hands = max(num_oop, num_ip)
     starting_pot = ref["starting_pot"]
     effective_stack = ref["effective_stack"]
     max_pot = starting_pot + 2 * effective_stack
 
-    print(f"\n  OOP: {num_oop}, IP: {num_ip}, max: {max_hands}")
+    print(f"\n  OOP: {num_oop}, IP: {num_ip}")
     print(f"  Pot: {starting_pot}, Stack: {effective_stack}, max_pot: {max_pot}")
     print(f"  Total iterations across files: {total_iters}")
     print(f"  Total boundary slots: {total_boundaries}")
@@ -290,17 +347,24 @@ def main():
     for pot, stack in sorted_ps:
         print(f"    pot={pot}, stack={stack}, pot_norm={pot/max_pot:.4f}, stack_norm={stack/max_pot:.4f}")
 
+    # Load hand-to-card-pair-index mapping
+    print(f"\nLoading hand indices from: {hands_path}")
+    oop_indices, ip_indices = load_hand_indices(hands_path, num_oop, num_ip)
+    print(f"  OOP: {num_oop} hands mapped into 1326-dim space")
+    print(f"  IP:  {num_ip} hands mapped into 1326-dim space")
+    print(f"  Occupied positions: {len(set(oop_indices) | set(ip_indices))} / {FULL_HANDS}")
+
     # Build dataset
-    print("\nBuilding dataset (pot/stack features)...")
-    X, Y, M, info = build_dataset(all_data)
+    print("\nBuilding dataset (1326-dim universal space)...")
+    X, Y, M, info = build_dataset(all_data, oop_indices, ip_indices)
     n_samples = X.shape[0]
     in_dim = info["in_dim"]
     out_dim = info["out_dim"]
     n_valid = int(M.sum())
     print(f"  Samples: {n_samples}")
-    print(f"  Input dim: {in_dim} (pot_norm=1 + stack_norm=1 + player=1 + cfreach={max_hands})")
-    print(f"  Output dim: {out_dim} (max_hands={max_hands})")
-    print(f"  Valid output values: {n_valid:,} / {n_samples * out_dim:,} ({100*n_valid/(n_samples*out_dim):.1f}%)")
+    print(f"  Input dim: {in_dim} (pot_norm=1 + stack_norm=1 + player=1 + cfreach={FULL_HANDS})")
+    print(f"  Output dim: {out_dim} ({FULL_HANDS})")
+    print(f"  Valid output positions: {n_valid:,} / {n_samples * out_dim:,} ({100*n_valid/(n_samples*out_dim):.1f}%)")
 
     # Scale targets
     valid_vals = Y[M > 0]
@@ -448,12 +512,12 @@ def main():
     sess = ort.InferenceSession(onnx_path)
     pred_all = sess.run(None, {"input": X.astype(np.float32)})[0] * saved_yscale
 
-    num_hands = [num_oop, num_ip]
+    player_idx_map = [oop_indices, ip_indices]
     errs_by_player = {0: [], 1: []}
     for i in range(n_samples):
-        player = int(X[i, 2])  # player is at index 2 (after pot_norm, stack_norm)
-        n_p = num_hands[player]
-        diff = np.abs(pred_all[i, :n_p] - Y[i, :n_p])
+        player = int(X[i, 2])
+        idx = player_idx_map[player]
+        diff = np.abs(pred_all[i, idx] - Y[i, idx])
         errs_by_player[player].append(diff.mean())
 
     for p in range(2):
@@ -474,7 +538,7 @@ def main():
         "y_scale": saved_yscale,
         "in_dim": in_dim,
         "out_dim": out_dim,
-        "max_hands": max_hands,
+        "full_hands": FULL_HANDS,
         "num_oop": num_oop,
         "num_ip": num_ip,
         "unique_pot_stack": sorted_ps,

@@ -3,7 +3,7 @@
 cargo run --example build_bt1 --release --features "bincode rayon" -- config/KcQh7s.json 
 
 # training
-python trainings/train_bt1.py
+python trainings/train_bt2.py data/bt2/KcQh7s_f*.bt2
 
 # solve with model
 export ORT_DYLIB_PATH=/opt/homebrew/lib/python3.14/site-packages/onnxruntime/capi/libonnxruntime.1.24.1.dylib
