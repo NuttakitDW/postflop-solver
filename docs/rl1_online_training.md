@@ -6,7 +6,7 @@ All Phase 2 experiments fail from **distribution shift**: model trains on one cf
 
 ## Objective
 
-Train a model that produces boundary CFVs achieving **< 0.3% exploitability** (relative to pot) on a single board/config.
+Train a model that produces boundary CFฝVs achieving **< 0.3% exploitability** (relative to pot) on a single board/config.
 
 **MVP**: One board (KcQh7s), exploitability < 0.3%. That proves Phase 2 works.
 

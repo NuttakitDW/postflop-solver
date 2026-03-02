@@ -578,6 +578,52 @@ pub fn collect_boundary_cfreaches(
     boundaries
 }
 
+/// Proceeds DCFR for a single player with model-predicted CFVs driving flop regrets.
+///
+/// Traverses the full tree (flop + turn + river). At turn boundary chance nodes:
+/// - Turn/river subtrees are traversed normally (regrets updated, true CFVs computed)
+/// - The true CFV is recorded as a training label
+/// - BUT the model's CFV (from `model_cfvs`) is returned to the flop parent
+///
+/// This means flop regrets are updated based on the model's (possibly wrong) predictions,
+/// while turn/river regrets are updated correctly. The full tree has valid strategies at
+/// all nodes, enabling exploitability computation.
+///
+/// Returns the true boundary CFVs (from subtree traversal) in DFS order.
+pub fn solve_step_with_model(
+    game: &PostFlopGame,
+    current_iteration: u32,
+    player: usize,
+    model_cfvs: &[Vec<f32>],
+) -> Vec<Vec<f32>> {
+    if game.is_solved() {
+        panic!("Game is already solved");
+    }
+    if !game.is_ready() {
+        panic!("Game is not ready");
+    }
+
+    let mut root = game.root();
+    let params = DiscountParams::new(current_iteration);
+    let mut result = Vec::with_capacity(game.num_private_hands(player));
+    let mut true_cfvs = Vec::new();
+    let mut boundary_counter = 0usize;
+    solve_recursive_with_model(
+        result.spare_capacity_mut(),
+        game,
+        &mut root,
+        player,
+        game.initial_weights(player ^ 1),
+        &params,
+        model_cfvs,
+        &mut true_cfvs,
+        &mut boundary_counter,
+    );
+    assert_eq!(boundary_counter, model_cfvs.len(),
+        "Boundary count mismatch: visited {} expected {}", boundary_counter, model_cfvs.len());
+    true_cfvs
+}
+
 fn collect_cfreaches_recursive(
     game: &PostFlopGame,
     node: &mut PostFlopNode,
@@ -950,6 +996,186 @@ fn solve_recursive_replay(
                 row(&cfreach_actions, action, row_size),
                 params,
                 boundary_cfvs,
+                boundary_counter,
+            );
+        }
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_uninit(result, &cfv_actions);
+    }
+}
+
+/// Like `solve_recursive_recording` but substitutes model CFVs at turn boundaries.
+///
+/// At turn boundary chance nodes:
+/// 1. Traverses the full subtree normally (turn/river regrets updated, true CFV computed)
+/// 2. Records the true CFV into `true_cfvs`
+/// 3. Overwrites `result` with model's CFV before returning to flop parent
+///
+/// Below turn boundaries, this is identical to `solve_recursive_recording` (normal DCFR).
+/// Above turn boundaries, flop sees model CFVs instead of true CFVs.
+fn solve_recursive_with_model(
+    result: &mut [MaybeUninit<f32>],
+    game: &PostFlopGame,
+    node: &mut PostFlopNode,
+    player: usize,
+    cfreach: &[f32],
+    params: &DiscountParams,
+    model_cfvs: &[Vec<f32>],
+    true_cfvs: &mut Vec<Vec<f32>>,
+    boundary_counter: &mut usize,
+) {
+    if node.is_terminal() {
+        game.evaluate(result, node, player, cfreach);
+        return;
+    }
+
+    let num_actions = node.num_actions();
+    let num_hands = result.len();
+
+    if num_actions == 1 && !node.is_chance() {
+        let child = &mut node.play(0);
+        solve_recursive_with_model(result, game, child, player, cfreach, params,
+            model_cfvs, true_cfvs, boundary_counter);
+        return;
+    }
+
+    #[cfg(feature = "custom-alloc")]
+    let cfv_actions = MutexLike::new(Vec::with_capacity_in(num_actions * num_hands, StackAlloc));
+    #[cfg(not(feature = "custom-alloc"))]
+    let cfv_actions = MutexLike::new(Vec::with_capacity(num_actions * num_hands));
+
+    if node.is_chance() {
+        let chance_factor = game.chance_factor(node);
+
+        #[cfg(feature = "custom-alloc")]
+        let mut cfreach_updated = Vec::with_capacity_in(cfreach.len(), StackAlloc);
+        #[cfg(not(feature = "custom-alloc"))]
+        let mut cfreach_updated = Vec::with_capacity(cfreach.len());
+        mul_slice_scalar_uninit(
+            cfreach_updated.spare_capacity_mut(),
+            cfreach,
+            1.0 / chance_factor as f32,
+        );
+        unsafe { cfreach_updated.set_len(cfreach.len()) };
+
+        // Process children sequentially (deterministic DFS order)
+        for action in 0..num_actions {
+            solve_recursive_with_model(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                &cfreach_updated,
+                params,
+                model_cfvs,
+                true_cfvs,
+                boundary_counter,
+            );
+        }
+
+        #[cfg(feature = "custom-alloc")]
+        let mut result_f64 = Vec::with_capacity_in(num_hands, StackAlloc);
+        #[cfg(not(feature = "custom-alloc"))]
+        let mut result_f64 = Vec::with_capacity(num_hands);
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        sum_slices_f64_uninit(result_f64.spare_capacity_mut(), &cfv_actions);
+        unsafe { result_f64.set_len(num_hands) };
+
+        let isomorphic_chances = game.isomorphic_chances(node);
+        for (i, &isomorphic_index) in isomorphic_chances.iter().enumerate() {
+            let swap_list = &game.isomorphic_swap(node, i)[player];
+            let tmp = row_mut(&mut cfv_actions, isomorphic_index as usize, num_hands);
+            apply_swap(tmp, swap_list);
+            result_f64.iter_mut().zip(&*tmp).for_each(|(r, &v)| {
+                *r += v as f64;
+            });
+            apply_swap(tmp, swap_list);
+        }
+
+        result.iter_mut().zip(&result_f64).for_each(|(r, &v)| {
+            r.write(v as f32);
+        });
+
+        // Turn boundary: record true CFV, then substitute model CFV
+        if node.turn() == NOT_DEALT {
+            // Record true CFV (computed from full subtree traversal above)
+            let true_cfv: Vec<f32> = result.iter()
+                .map(|v| unsafe { v.assume_init() })
+                .collect();
+            true_cfvs.push(true_cfv);
+
+            // Overwrite result with model's CFV for flop parent
+            let idx = *boundary_counter;
+            *boundary_counter += 1;
+            let model_cfv = &model_cfvs[idx];
+            for (r, &v) in result.iter_mut().zip(model_cfv.iter()) {
+                r.write(v);
+            }
+        }
+    } else if node.player() == player {
+        for action in 0..num_actions {
+            solve_recursive_with_model(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                cfreach,
+                params,
+                model_cfvs,
+                true_cfvs,
+                boundary_counter,
+            );
+        }
+
+        let mut strategy = regret_matching(node.regrets(), num_actions);
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut strategy, locking);
+
+        let mut cfv_actions = cfv_actions.lock();
+        unsafe { cfv_actions.set_len(num_actions * num_hands) };
+        let result = fma_slices_uninit(result, &strategy, &cfv_actions);
+
+        // update cumulative strategy
+        let gamma = params.gamma_t;
+        let cum_strategy = node.strategy_mut();
+        cum_strategy.iter_mut().zip(&strategy).for_each(|(x, y)| {
+            *x = *x * gamma + *y;
+        });
+
+        // update cumulative regret
+        let (alpha, beta) = (params.alpha_t, params.beta_t);
+        let cum_regret = node.regrets_mut();
+        cum_regret.iter_mut().zip(&*cfv_actions).for_each(|(x, y)| {
+            let coef = if x.is_sign_positive() { alpha } else { beta };
+            *x = *x * coef + *y;
+        });
+        cum_regret.chunks_exact_mut(num_hands).for_each(|row| {
+            sub_slice(row, result);
+        });
+    } else {
+        let mut cfreach_actions = regret_matching(node.regrets(), num_actions);
+        let locking = game.locking_strategy(node);
+        apply_locking_strategy(&mut cfreach_actions, locking);
+
+        let row_size = cfreach.len();
+        cfreach_actions.chunks_exact_mut(row_size).for_each(|row| {
+            mul_slice(row, cfreach);
+        });
+
+        for action in 0..num_actions {
+            solve_recursive_with_model(
+                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                game,
+                &mut node.play(action),
+                player,
+                row(&cfreach_actions, action, row_size),
+                params,
+                model_cfvs,
+                true_cfvs,
                 boundary_counter,
             );
         }

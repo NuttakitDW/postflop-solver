@@ -1,0 +1,48 @@
+{
+  "board": {
+    "flop": "9s6d6c",
+    "turn": null,
+    "river": null
+  },
+  "ranges": {
+    "oop": "AA,KK,QQ,JJ,TT,AKs,AQs,AJs,KQs",
+    "ip": "AA,KK,QQ,JJ,TT,99,AKs,AQs,AJs,KQs,KJs"
+  },
+  "betSizes": {
+    "oopFlopBet": "33",
+    "oopFlopRaise": "66",
+    "oopTurnBet": "33, 66",
+    "oopTurnRaise": "66",
+    "oopTurnDonk": "33",
+    "oopRiverBet": "33, 66",
+    "oopRiverRaise": "66",
+    "oopRiverDonk": "33",
+    "ipFlopBet": "33, 66",
+    "ipFlopRaise": "66",
+    "ipTurnBet": "33, 66",
+    "ipTurnRaise": "66",
+    "ipRiverBet": "33, 66",
+    "ipRiverRaise": "66"
+  },
+  "tree": {
+    "startingPot": 55,
+    "effectiveStack": 180,
+    "rakePercent": 0.0,
+    "rakeCap": 0.0,
+    "donkOption": 3,
+    "addAllInThreshold": 600,
+    "forceAllInThreshold": 100,
+    "mergingThreshold": 10,
+    "maxRaisesPerStreet": 4
+  },
+  "solver": {
+    "maxIterations": 50,
+    "targetExploitabilityPercent": 0.3,
+    "useCompression": false
+  },
+  "output": {
+    "filename": "data/out/test_small.flop",
+    "compressionLevel": null,
+    "memo": "test_small"
+  }
+}
