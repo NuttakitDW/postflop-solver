@@ -384,7 +384,7 @@ def main():
     print(f"  Model params: {n_params:,}")
     print(f"  Param/valid ratio: {n_params / n_valid:.2f}x")
 
-    # Ranger21 optimizer
+    # Ranger21 optimizer (has built-in warmup/warmdown — no external scheduler needed)
     from ranger21 import Ranger21
     opt = Ranger21(
         net.parameters(),
@@ -392,14 +392,6 @@ def main():
         weight_decay=WEIGHT_DECAY,
         num_epochs=EPOCHS,
         num_batches_per_epoch=len(loader),
-    )
-
-    # OneCycleLR
-    tot_steps = len(loader) * EPOCHS
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=LR_MAX, total_steps=tot_steps,
-        pct_start=0.1, anneal_strategy="cos",
-        cycle_momentum=False, div_factor=10, final_div_factor=1e4,
     )
 
     # EMA
@@ -420,7 +412,6 @@ def main():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), CLIP)
             opt.step()
-            sched.step()
 
             with torch.no_grad():
                 for name, p in net.named_parameters():
@@ -470,7 +461,7 @@ def main():
             ema_rmse = (ema_loss ** 0.5) * y_scale
             print(f"  Epoch {ep:3d}  train={tr_loss:.8f}  ema={ema_loss:.8f}  "
                   f"rmse={rmse:.4f}  ema_rmse={ema_rmse:.4f}  "
-                  f"lr={sched.get_last_lr()[0]:.2e}  best={best_loss:.8f}")
+                  f"best={best_loss:.8f}")
 
     final_rmse = (best_loss ** 0.5) * y_scale
     print(f"\nBest EMA loss: {best_loss:.8f}  RMSE(chips): {final_rmse:.4f}")
