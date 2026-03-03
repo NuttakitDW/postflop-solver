@@ -339,6 +339,24 @@ impl GameWrapper {
     fn compute_exploitability(&self) -> f32 {
         compute_exploitability(&self.game)
     }
+
+    /// Finalize the game (normalize strategies for output).
+    /// Must be called before save_to_file. Cannot solve further after this.
+    fn finalize(&mut self) -> PyResult<()> {
+        finalize(&mut self.game);
+        Ok(())
+    }
+
+    /// Save the solved game to a .flop file.
+    /// Must call finalize() first.
+    fn save_to_file(&self, path: &str, memo: &str) -> PyResult<()> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        save_data_to_file(&self.game, memo, path, None)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to save: {}", e)))?;
+        Ok(())
+    }
 }
 
 // ─── Python module ───
