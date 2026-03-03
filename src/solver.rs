@@ -1060,19 +1060,34 @@ fn solve_recursive_with_model(
         );
         unsafe { cfreach_updated.set_len(cfreach.len()) };
 
-        // Process children sequentially (deterministic DFS order)
-        for action in 0..num_actions {
-            solve_recursive_with_model(
-                row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
-                game,
-                &mut node.play(action),
-                player,
-                &cfreach_updated,
-                params,
-                model_cfvs,
-                true_cfvs,
-                boundary_counter,
-            );
+        if node.turn() == NOT_DEALT {
+            // Turn boundary: children are turn/river subtrees with no more boundaries.
+            // Use parallel traversal via for_each_child + solve_recursive (rayon).
+            for_each_child(node, |action| {
+                solve_recursive(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    &cfreach_updated,
+                    params,
+                );
+            });
+        } else {
+            // Non-boundary chance node: sequential (preserves boundary ordering)
+            for action in 0..num_actions {
+                solve_recursive_with_model(
+                    row_mut(cfv_actions.lock().spare_capacity_mut(), action, num_hands),
+                    game,
+                    &mut node.play(action),
+                    player,
+                    &cfreach_updated,
+                    params,
+                    model_cfvs,
+                    true_cfvs,
+                    boundary_counter,
+                );
+            }
         }
 
         #[cfg(feature = "custom-alloc")]
