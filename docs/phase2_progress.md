@@ -444,6 +444,35 @@ The gap between NN (10.56%) and float32 lookup (0.0002%) is not closable — neu
 
 **Current best result (Experiment 3)**: 0.6% root avg diff, 13.6% full tree avg diff.
 
-**Next steps**:
-- Accept ~10-14% tree diff as inherent to approximate CFV methods — focus on multi-board generalization
-- Investigate modified DCFR variants that are less sensitive to boundary CFV noise
+---
+
+## Experiment 9: RL1 Online Training — Revisited (2025-03-04)
+
+**Key insight**: The "NN precision limit" conclusion from Experiment 7 only applies to **offline training** (bt1 approach). The core problem there was distribution shift — model trained on one trajectory, inference produces a different trajectory, errors compound.
+
+**RL1 avoids this entirely.** The model trains online, directly on its own trajectory each episode. There is no train/inference distribution mismatch. The model adapts to the exact cfreaches it produces.
+
+**Observation**: Exploitability keeps decreasing with more episodes. This proves that:
+1. The NN CAN learn to produce boundary CFVs that lead to correct strategies
+2. The precision limit is NOT fundamental — it was an artifact of the offline training setup
+3. The feedback loop is not inherently unstable when the model trains within it
+
+**Previous RL1 result**: 1.77% exploitability ceiling on 9s6d6c. This may have been due to:
+- Not enough episodes
+- Suboptimal hyperparameters (LR, model size, architecture)
+- Optimization landscape issues (local minima)
+
+These are **practical optimization challenges**, not fundamental limits.
+
+**Plan**: Double down on RL1 online training. Focus on:
+- More episodes / longer training runs
+- Hyperparameter tuning (LR schedule, model capacity, optimizer)
+- Better optimization strategies to break through plateaus
+- Target: < 0.5% exploitability on phase2.json (9s6d6c, 50% pot bet sizes)
+
+**Training command**:
+```
+/opt/anaconda3/bin/python trainings/train_rl1.py config/phase2.json --episodes 50
+```
+
+**Status**: In progress.

@@ -97,20 +97,35 @@ def save_plots(episode_losses, episode_exploits, pot, path):
         return
     eps = np.arange(1, len(episode_losses) + 1)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    exploit_pct = [e / pot * 100 for e in episode_exploits]
 
-    ax1.plot(eps, episode_losses)
-    ax1.set_yscale("log")
-    ax1.set_title("Avg Loss per Episode")
-    ax1.set_xlabel("Episode")
-    ax1.set_ylabel("MSE Loss")
-    ax1.grid(alpha=0.3)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
-    ax2.plot(eps, [e / pot * 100 for e in episode_exploits])
-    ax2.set_title("Exploitability (% of pot)")
-    ax2.set_xlabel("Episode")
-    ax2.set_ylabel("Exploitability %")
-    ax2.grid(alpha=0.3)
+    axes[0, 0].plot(eps, episode_losses)
+    axes[0, 0].set_title("Loss (linear)")
+    axes[0, 0].set_xlabel("Episode")
+    axes[0, 0].set_ylabel("MSE Loss")
+    axes[0, 0].grid(alpha=0.3)
+
+    axes[0, 1].plot(eps, episode_losses)
+    axes[0, 1].set_yscale("log")
+    axes[0, 1].set_title("Loss (log)")
+    axes[0, 1].set_xlabel("Episode")
+    axes[0, 1].set_ylabel("MSE Loss")
+    axes[0, 1].grid(alpha=0.3)
+
+    axes[1, 0].plot(eps, exploit_pct)
+    axes[1, 0].set_title("Exploitability (linear)")
+    axes[1, 0].set_xlabel("Episode")
+    axes[1, 0].set_ylabel("Exploitability %")
+    axes[1, 0].grid(alpha=0.3)
+
+    axes[1, 1].plot(eps, exploit_pct)
+    axes[1, 1].set_yscale("log")
+    axes[1, 1].set_title("Exploitability (log)")
+    axes[1, 1].set_xlabel("Episode")
+    axes[1, 1].set_ylabel("Exploitability %")
+    axes[1, 1].grid(alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(path, dpi=150)
