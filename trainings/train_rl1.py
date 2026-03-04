@@ -115,16 +115,20 @@ def save_plots(episode_losses, episode_exploits, pot, path):
     axes[0, 1].grid(alpha=0.3)
 
     axes[1, 0].plot(eps, exploit_pct)
+    axes[1, 0].axhline(y=0.5, color="orange", linestyle="--", label="Target 0.5%")
     axes[1, 0].set_title("Exploitability (linear)")
     axes[1, 0].set_xlabel("Episode")
     axes[1, 0].set_ylabel("Exploitability %")
+    axes[1, 0].legend()
     axes[1, 0].grid(alpha=0.3)
 
     axes[1, 1].plot(eps, exploit_pct)
+    axes[1, 1].axhline(y=0.5, color="orange", linestyle="--", label="Target 0.5%")
     axes[1, 1].set_yscale("log")
     axes[1, 1].set_title("Exploitability (log)")
     axes[1, 1].set_xlabel("Episode")
     axes[1, 1].set_ylabel("Exploitability %")
+    axes[1, 1].legend()
     axes[1, 1].grid(alpha=0.3)
 
     plt.tight_layout()
