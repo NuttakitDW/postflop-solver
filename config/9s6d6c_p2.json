@@ -36,7 +36,7 @@
     "maxRaisesPerStreet": 4
   },
   "solver": {
-    "maxIterations": 200,
+    "maxIterations": 2000,
     "targetExploitabilityPercent": 0.5,
     "useCompression": false
   },

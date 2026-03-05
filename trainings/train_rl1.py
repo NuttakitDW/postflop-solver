@@ -144,6 +144,7 @@ def main():
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--target", type=float, default=0.5, help="Stop when exploitability < target %%")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -278,6 +279,18 @@ def main():
         if exploit < best_exploit:
             best_exploit = exploit
             torch.save(ckpt, os.path.join(out_dir, "best.pt"))
+
+        # Early stop
+        if exploit_pct < args.target:
+            print(f"\n  Hit target {args.target}% at episode {ep+1}. Stopping.")
+            save_plots(episode_losses, episode_exploits, pot, os.path.join(out_dir, "curves.png"))
+            csv_path = os.path.join(out_dir, "log.csv")
+            with open(csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["episode", "avg_loss", "exploitability_chips", "exploitability_pct"])
+                for i, (l, e) in enumerate(zip(episode_losses, episode_exploits), 1):
+                    w.writerow([i, f"{l:.8f}", f"{e:.6f}", f"{e/pot*100:.4f}"])
+            break
 
         # Save plots + CSV
         save_plots(episode_losses, episode_exploits, pot, os.path.join(out_dir, "curves.png"))
