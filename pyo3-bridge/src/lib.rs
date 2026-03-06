@@ -486,6 +486,17 @@ impl GameWrapper {
         let bets = self.game.total_bet_amount();
         (bets[0], bets[1])
     }
+
+    /// Lock the strategy at the current node.
+    /// strategy_flat: [num_actions * num_hands] — row-major (action, hand).
+    /// Must be called before solve/finalize.
+    fn lock_current_strategy(&mut self, strategy_flat: Vec<f32>) -> PyResult<()> {
+        if self.game.is_terminal_node() || self.game.is_chance_node() {
+            return Err(PyRuntimeError::new_err("Cannot lock terminal/chance node"));
+        }
+        self.game.lock_current_strategy(&strategy_flat);
+        Ok(())
+    }
 }
 
 // ─── Python module ───
