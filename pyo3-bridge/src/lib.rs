@@ -289,6 +289,15 @@ impl GameWrapper {
         self.tree_config.starting_pot
     }
 
+    /// Return private cards for a player as list of (card1, card2) tuples.
+    /// Each card is a u8 (0-51). Used to build card conflict matrix in Python.
+    fn private_cards(&self, player: usize) -> Vec<(u8, u8)> {
+        self.game.private_cards(player)
+            .iter()
+            .map(|&(c1, c2)| (c1, c2))
+            .collect()
+    }
+
     /// Collect opponent cfreach at each turn boundary (DFS order).
     /// Returns list of cfreach vectors, one per boundary.
     fn collect_boundary_cfreaches(&self, player: usize) -> Vec<Vec<f32>> {
