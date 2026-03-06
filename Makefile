@@ -3,7 +3,7 @@
 CONFIG ?= config/template.json
 
 start:
-	cargo run --example backend_solver --features "bincode rayon zstd jemalloc" -- $(CONFIG)
+	cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc" -- $(CONFIG)
 
 start-debug:
 	RUST_LOG=debug cargo run --example backend_solver --release --features "bincode rayon zstd jemalloc logging" -- $(CONFIG)
