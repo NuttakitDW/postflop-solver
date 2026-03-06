@@ -10,7 +10,7 @@
   },
   "betSizes": {
     "oopFlopBet": "33, 75",
-    "oopFlopRaise": "33, 33",
+    "oopFlopRaise": "33",
     "oopTurnBet": "33, 75",
     "oopTurnRaise": "33",
     "oopTurnDonk": "33",
