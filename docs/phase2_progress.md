@@ -475,4 +475,47 @@ These are **practical optimization challenges**, not fundamental limits.
 /opt/anaconda3/bin/python trainings/train_rl1.py config/phase2.json --episodes 50
 ```
 
-**Status**: In progress.
+**Status**: Superseded by DeepRun NN.
+
+---
+
+## DeepRun NN: Strategy Prediction (2025-03-07)
+
+**Key insight**: All previous experiments (1-8) tried to predict **boundary CFVs** — values that depend on the entire range and feed into a compounding feedback loop. DeepRun NN sidesteps this entirely by predicting the **final converged strategy** (action probabilities per hand). This works because:
+
+1. **Strategy is decomposable per hand** — each hand's action probabilities are independent
+2. **No feedback loop** — one-shot prediction of the end result, not during CFR iteration
+3. **No distribution shift** — the model never runs inside the solver
+
+**Pipeline**: CFR solve → extract strategies → train NN → inference (instant, per hand)
+
+**Architecture**:
+- Single board: 3 hidden layers × 256, input=130 dims (hand + player + history + pot)
+- Multi board: 4 hidden layers × 512, input=286 dims (hand + board + player + history + pot)
+- Output: softmax over actions (padded to max_actions)
+
+**Results**:
+
+| Config | Nodes | Samples | Max Diff | Notes |
+|--------|-------|---------|----------|-------|
+| test_small (single board) | 16 | 792 | 0.002 | 300x compression (229MB → 655KB) |
+| 2c3c4h (multi-board model) | 24 | ~17K | 0.025 | One model for 3 boards |
+| 7s6s4c (multi-board model) | 24 | ~17K | 0.035 | Same model |
+| Ad8s2c (multi-board model) | 24 | ~17K | 0.027 | Same model |
+
+**Comparison with previous approaches**:
+
+| Approach | Root Diff | Full Tree Diff |
+|----------|-----------|----------------|
+| Exp 1: Static Oracle | 57% | 27% |
+| Exp 2: Model v1 (1326-dim) | 35% | 35% |
+| Exp 3: Model v1 (solver idx) | 0.6% | 13.6% |
+| Exp 7: Iter-only (no cfreach) | - | 10.6% |
+| RL1 Online | 1.77% exploit | - |
+| **DeepRun NN** | **< 0.1%** | **N/A (flop only)** |
+
+**Limitations**: Requires CFR solve first (compression, not replacement). Fixed range. Flop only. Current results are memorization — generalization to unseen boards is future work.
+
+**Full documentation**: [docs/deeprun_nn.md](deeprun_nn.md)
+
+**Files**: `trainings/demo_nn_flop.py`, `trainings/demo_nn_flop_multi.py`, `trainings/infer_nn_flop.py`, `trainings/build_flop_from_nn.py`
