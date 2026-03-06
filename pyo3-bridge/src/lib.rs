@@ -262,6 +262,28 @@ impl GameWrapper {
         })
     }
 
+    /// Load a solved game from a .flop file.
+    #[staticmethod]
+    fn load_from_file(flop_path: &str) -> PyResult<Self> {
+        let (game, _memo): (PostFlopGame, String) =
+            load_data_from_file(flop_path, None)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to load: {}", e)))?;
+        let card_config = CardConfig {
+            range: [Range::default(), Range::default()],
+            flop: [0; 3],
+            turn: NOT_DEALT,
+            river: NOT_DEALT,
+        };
+        let tree_config = TreeConfig::default();
+        Ok(GameWrapper {
+            cached_num_boundaries: 0,
+            max_iterations: 0,
+            game,
+            card_config,
+            tree_config,
+        })
+    }
+
     /// Reset the game state (zeros all regrets and strategies).
     fn reset(&mut self) -> PyResult<()> {
         self.game = build_game(&self.card_config, &self.tree_config)
@@ -356,6 +378,113 @@ impl GameWrapper {
         save_data_to_file(&self.game, memo, path, None)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to save: {}", e)))?;
         Ok(())
+    }
+
+    /// Run standard DCFR solve to convergence.
+    /// target_pct: target exploitability as percentage of pot (e.g. 0.5 = 0.5%).
+    /// Calls finalize() internally — do NOT call finalize() again.
+    fn solve_standard(&mut self, target_pct: f32) -> PyResult<f32> {
+        let target = self.tree_config.starting_pot as f32 * target_pct / 100.0;
+        let exploitability = solve(
+            &mut self.game,
+            self.max_iterations,
+            target,
+            true,
+        );
+        Ok(exploitability)
+    }
+
+    /// Get the strategy at the root node (flop root, OOP acts first).
+    /// Returns (num_actions, num_hands, strategy_flat) where strategy_flat
+    /// is row-major: strategy_flat[action * num_hands + hand] = probability.
+    fn get_root_strategy(&self) -> PyResult<(usize, usize, Vec<f32>)> {
+        // Root node is OOP's first decision
+        let num_actions = self.game.available_actions().len();
+        let num_hands = self.game.num_private_hands(0); // OOP
+        let strategy = self.game.strategy();
+        Ok((num_actions, num_hands, strategy))
+    }
+
+    /// Get private card pairs for a player.
+    /// Returns list of (card1, card2) where each card is 0..51.
+    /// Card encoding: id = rank * 4 + suit (rank: 0=2..12=A, suit: 0=club..3=spade).
+    fn private_cards(&self, player: usize) -> Vec<(u8, u8)> {
+        self.game.private_cards(player)
+            .iter()
+            .map(|&(c1, c2)| (c1, c2))
+            .collect()
+    }
+
+    /// Get available actions at the root node.
+    fn root_actions(&self) -> Vec<String> {
+        self.game.available_actions()
+            .iter()
+            .map(|a| format!("{:?}", a))
+            .collect()
+    }
+
+    // ─── Tree navigation (for reading strategies at any node) ───
+
+    /// Navigate back to the root node.
+    fn back_to_root(&mut self) {
+        self.game.back_to_root();
+    }
+
+    /// Play an action at the current node (0-indexed).
+    fn play(&mut self, action: usize) {
+        self.game.play(action);
+    }
+
+    /// Get action history from root to current node.
+    fn history(&self) -> Vec<usize> {
+        self.game.history().to_vec()
+    }
+
+    /// Current player at this node (0=OOP, 1=IP).
+    fn current_player(&self) -> usize {
+        self.game.current_player()
+    }
+
+    /// Is the current node a terminal node?
+    fn is_terminal(&self) -> bool {
+        self.game.is_terminal_node()
+    }
+
+    /// Is the current node a chance node (turn/river deal)?
+    fn is_chance(&self) -> bool {
+        self.game.is_chance_node()
+    }
+
+    /// Available actions at the current node.
+    fn current_actions(&self) -> Vec<String> {
+        self.game.available_actions()
+            .iter()
+            .map(|a| format!("{:?}", a))
+            .collect()
+    }
+
+    /// Number of available actions at the current node.
+    fn current_num_actions(&self) -> usize {
+        self.game.available_actions().len()
+    }
+
+    /// Get strategy at the current node.
+    /// Returns (num_actions, num_hands, strategy_flat).
+    fn get_current_strategy(&self) -> PyResult<(usize, usize, Vec<f32>)> {
+        if self.game.is_terminal_node() || self.game.is_chance_node() {
+            return Err(PyRuntimeError::new_err("No strategy at terminal/chance node"));
+        }
+        let player = self.game.current_player();
+        let num_actions = self.game.available_actions().len();
+        let num_hands = self.game.num_private_hands(player);
+        let strategy = self.game.strategy();
+        Ok((num_actions, num_hands, strategy))
+    }
+
+    /// Total bet amounts [OOP, IP] at the current node.
+    fn total_bet_amount(&self) -> (i32, i32) {
+        let bets = self.game.total_bet_amount();
+        (bets[0], bets[1])
     }
 }
 
