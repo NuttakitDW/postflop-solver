@@ -2,8 +2,8 @@
 Inference: play through the full flop using a trained NN model.
 
 Usage:
-  python infer_nn_flop.py <model_flop.pt>              # interactive mode
-  python infer_nn_flop.py <model_flop.pt> KcKd          # show strategy at all nodes for one hand
+  python nn1_infer.py <model_flop.pt>              # interactive mode
+  python nn1_infer.py <model_flop.pt> KcKd          # show strategy at all nodes for one hand
 """
 
 import sys

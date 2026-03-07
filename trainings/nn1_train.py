@@ -1,7 +1,7 @@
 """
 Train a NN to predict strategy at ALL flop decision nodes.
 
-Usage: python demo_nn_flop.py <path_to.flop>
+Usage: python nn1_train.py <path_to.flop>
 
 The NN learns: (hand, node_context) -> action_probabilities
 for every player node on the flop (both OOP and IP).
@@ -25,7 +25,7 @@ def hand_str(c1, c2):
     return f"{card_str(c1)}{card_str(c2)}"
 
 if len(sys.argv) < 2:
-    print("Usage: python demo_nn_flop.py <path_to.flop>")
+    print("Usage: python nn1_train.py <path_to.flop>")
     sys.exit(1)
 
 flop_path = sys.argv[1]
@@ -184,7 +184,7 @@ model.load_state_dict(best_state)
 print(f"Best loss: {best_loss:.6f}")
 
 # ── Save model ──
-model_dir = "models/demo"
+model_dir = "models/nn1"
 os.makedirs(model_dir, exist_ok=True)
 model_path = os.path.join(model_dir, f"{basename}_flop.pt")
 torch.save({

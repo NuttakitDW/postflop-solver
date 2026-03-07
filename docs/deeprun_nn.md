@@ -68,44 +68,31 @@ Use the existing Rust solver to produce a `.flop` file:
 make start CONFIG=config/2c3c4h_p2.json
 ```
 
-### Step 2: Train DeepRun NN
+### Step 2: Train NN
 
-**Single board:**
 ```bash
-/opt/anaconda3/bin/python trainings/demo_nn_flop.py data/out/2c3c4h_p2.flop
+/opt/anaconda3/bin/python trainings/nn1_train.py data/out/2c3c4h_p2.flop
 ```
 
 Output:
-- `models/demo/2c3c4h_p2_flop.pt` — trained model
-- `models/demo/2c3c4h_p2_flop_loss.png` — loss curve
+- `models/nn1/2c3c4h_p2_flop.pt` — trained model
+- `models/nn1/2c3c4h_p2_flop_loss.png` — loss curve
 
-**Multi board (one model for multiple spots):**
+### Step 3: Solve with NN model
+
 ```bash
-/opt/anaconda3/bin/python trainings/demo_nn_flop_multi.py \
-  data/out/2c3c4h_p2.flop \
-  data/out/7s6s4c_p2.flop \
-  data/out/Ad8s2c_p2.flop
-```
-
-Output:
-- `models/demo/2c3c4h_7s6s4c_Ad8s2c_flop.pt`
-- `models/demo/2c3c4h_7s6s4c_Ad8s2c_flop_loss.png`
-
-### Step 3: Inference
-
-**Query a specific hand:**
-```bash
-/opt/anaconda3/bin/python trainings/infer_nn_flop.py models/demo/test_small_flop.pt KcKd
-```
-
-**Build a .flop file from NN (flop from NN, turn/river uniform):**
-```bash
-/opt/anaconda3/bin/python trainings/build_flop_from_nn.py \
+/opt/anaconda3/bin/python trainings/nn1_solve.py \
   config/2c3c4h_p2.json \
-  models/demo/2c3c4h_7s6s4c_Ad8s2c_flop.pt
+  models/nn1/2c3c4h_p2_flop.pt
 ```
 
-Output: `data/out/2c3c4h_p2-nn.flop`
+Output: `data/out/2c3c4h_p2-nn.flop` (flop from NN, turn/river uniform)
+
+### Optional: Interactive inference
+
+```bash
+/opt/anaconda3/bin/python trainings/nn1_infer.py models/nn1/2c3c4h_p2_flop.pt KcKd
+```
 
 ## Results
 
@@ -164,10 +151,7 @@ Note: DeepRun NN only covers flop strategy. Turn/river require separate handling
 
 | File | Purpose |
 |------|---------|
-| `trainings/demo_nn_strategy.py` | Train on single spot (root only) |
-| `trainings/demo_nn_flop.py` | Train on all flop nodes (single board) |
-| `trainings/demo_nn_flop_multi.py` | Train on all flop nodes (multi board) |
-| `trainings/infer_nn_strategy.py` | Infer single spot |
-| `trainings/infer_nn_flop.py` | Infer all flop nodes |
-| `trainings/build_flop_from_nn.py` | Build .flop file from NN model |
+| `trainings/nn1_train.py` | Train NN on all flop nodes (single board) |
+| `trainings/nn1_solve.py` | Build .flop file from trained NN model |
+| `trainings/nn1_infer.py` | Interactive inference — query hand strategies |
 | `pyo3-bridge/src/lib.rs` | PyO3 bridge with tree navigation + strategy lock |

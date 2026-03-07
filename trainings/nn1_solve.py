@@ -1,7 +1,7 @@
 """
 Build a .flop file using NN for flop strategies, uniform for turn/river.
 
-Usage: python build_flop_from_nn.py <config.json> <model_flop.pt> [output.flop]
+Usage: python nn1_solve.py <config.json> <model_flop.pt> [output.flop]
 
 1. Creates a fresh game from config (same tree structure)
 2. Navigates all flop nodes → locks strategy from NN predictions
@@ -50,7 +50,7 @@ class FlopStrategyNet4(nn.Module):
         return torch.softmax(self.net(x), dim=-1)
 
 if len(sys.argv) < 3:
-    print("Usage: python build_flop_from_nn.py <config.json> <model_flop.pt> [output.flop]")
+    print("Usage: python nn1_solve.py <config.json> <model_flop.pt> [output.flop]")
     sys.exit(1)
 
 config_path = sys.argv[1]
