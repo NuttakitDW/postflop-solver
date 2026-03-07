@@ -24,7 +24,9 @@ make start CONFIG=config/2c3c4h_p2.json
 /opt/anaconda3/bin/python trainings/demo_nn_flop_multi.py \
   data/out/2c3c4h_p2.flop \
   data/out/7s6s4c_p2.flop \
-  data/out/Ad8s2c_p2.flop
+  data/out/Ad8s2c_p2.flop \
+  data/out/9s6d6c_p2.flop \
+  data/out/Jc8c6s_p2.flop
 ```
 
 ### Step 3: Inference
@@ -37,8 +39,8 @@ make start CONFIG=config/2c3c4h_p2.json
 **Build a .flop file from NN (flop from NN, turn/river uniform):**
 ```bash
 /opt/anaconda3/bin/python trainings/build_flop_from_nn.py \
-  config/2c3c4h_p2.json \
-  models/demo/2c3c4h_7s6s4c_Ad8s2c_flop.pt
+  config/9s6d6c_p2.json \
+  models/demo/2c3c4h_7s6s4c_Ad8s2c_9s6d6c_Jc8c6s_flop.pt
 ```
 
 Output: `data/out/2c3c4h_p2-nn.flop`

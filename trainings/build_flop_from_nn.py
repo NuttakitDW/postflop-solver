@@ -134,9 +134,13 @@ def predict_strategy(cards, player, history, bets, n_act, n_hands):
         probs = model(torch.from_numpy(X)).numpy()
 
     strategy_flat = np.zeros(n_act * n_hands, dtype=np.float32)
+    if n_act > max_actions:
+        print(f"    WARNING: node has {n_act} actions but model only supports {max_actions}. Extra actions get 0 probability.")
     for a in range(n_act):
         for h in range(n_hands):
-            strategy_flat[a * n_hands + h] = probs[h, a]
+            if a < max_actions:
+                strategy_flat[a * n_hands + h] = probs[h, a]
+            # else: stays 0.0
 
     return strategy_flat.tolist()
 
