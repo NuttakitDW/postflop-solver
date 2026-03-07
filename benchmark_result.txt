@@ -1,0 +1,79 @@
+==================================================
+POSTFLOP SOLVER BENCHMARK
+==================================================
+Machine:   ip-172-31-18-251.ap-southeast-1.compute.internal
+CPU cores: 16
+/home/ec2-user/.local/lib/python3.9/site-packages/torch/_subclasses/functional_tensor.py:279: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /pytorch/torch/csrc/utils/tensor_numpy.cpp:81.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+PyTorch:   2.8.0+cu128
+
+[ CFR SOLVE ] config: 2c3c4h_p2.json, 16 threads, 200 iterations
+
+  Solver error: {
+  "success": true,
+  "outputFile": "/home/ec2-user/postflop-solver/_benchmark_tmp.flop",
+  "solveTimeSeconds": 118.191270267,
+  "totalTimeSeconds": 119.291340983,
+  "finalExploitability": 0.25495172,
+  "exploitabilityPercent": 0.46354857,
+  "memoryMb": 5606.332759857178,
+  "iterationsUsed": 200,
+  "oopHands": 893,
+  "ipHands": 570,
+  "error": null
+}
+
+[ NN TRAINING ] device: CPU
+
+  nn1 (current): 171,525 params, 100,000 samples
+    245 ms/epoch, 408,453 samples/s
+    Full training (50 epochs × 2.8B): ~95 hours
+
+  nn2 (production): 4,721,674 params, 1,000,000 samples
+    34630 ms/epoch, 28,877 samples/s
+    Full training (50 epochs × 2.8B): ~1,347 hours
+
+
+==================================================
+DONE
+==================================================
+
+
+==================================================
+POSTFLOP SOLVER BENCHMARK
+==================================================
+Machine:   ip-172-31-33-63.ap-southeast-1.compute.internal
+CPU cores: 16
+PyTorch:   2.10.0+cu128
+GPU:       Tesla T4
+
+[ CFR SOLVE ] config: 2c3c4h_p2.json, 16 threads, 200 iterations
+
+  Solve time:   202.18s
+  Memory:       5606 MB
+  Exploitability: 0.464%
+
+  Projected per solve (~500 iters): 505.4s
+  Full production (3,501,225 solves):
+    This machine alone: 491,573 hours (20,482 days)
+     4 machines:        122,893 hours (5,121 days)
+     8 machines:        61,447 hours (2,560 days)
+    16 machines:        30,723 hours (1,280 days)
+    32 machines:        15,362 hours (640 days)
+
+  RAM for parallel solves: 21.9 GB (4 parallel)
+
+[ NN TRAINING ] device: Tesla T4
+
+  nn1 (current): 171,525 params, 100,000 samples
+    31 ms/epoch, 3,250,267 samples/s
+    Full training (50 epochs × 2.8B): ~12 hours
+
+  nn2 (production): 4,721,674 params, 200,000 samples
+    1168 ms/epoch, 171,207 samples/s
+    Full training (50 epochs × 2.8B): ~227 hours
+
+
+==================================================
+DONE
+==================================================
