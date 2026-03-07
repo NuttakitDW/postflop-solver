@@ -47,7 +47,7 @@ def build_solver():
 def run_solve(threads, max_iter):
     with open(CONFIG) as f:
         cfg = json.load(f)
-    cfg["output"]["filename"] = "/dev/null"
+    cfg["output"]["filename"] = os.path.join(PROJECT_DIR, "_benchmark_tmp.flop")
     cfg["solver"]["maxIterations"] = max_iter
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, dir=PROJECT_DIR) as tmp:
@@ -65,6 +65,9 @@ def run_solve(threads, max_iter):
         return None
     finally:
         os.unlink(tmp_path)
+        flop_tmp = os.path.join(PROJECT_DIR, "_benchmark_tmp.flop")
+        if os.path.exists(flop_tmp):
+            os.unlink(flop_tmp)
 
 
 def benchmark_cfr():
