@@ -140,7 +140,7 @@ def benchmark_nn():
     # Test two model sizes
     tests = [
         ("nn1 (current)",  256, 3, 150,  5,  100_000),
-        ("nn2 (production)", 1024, 5, 500, 10, 1_000_000),
+        ("nn2 (production)", 1024, 5, 500, 10, 200_000),
     ]
 
     for name, hidden, n_layers, in_dim, out_dim, n_samples in tests:
