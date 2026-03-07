@@ -58,10 +58,16 @@ def run_solve(threads, max_iter):
         env = os.environ.copy()
         env["RAYON_NUM_THREADS"] = str(threads)
         r = subprocess.run([SOLVER_BIN, tmp_path], capture_output=True, text=True, env=env, timeout=600)
+        if r.returncode != 0:
+            print(f"  Solver failed (exit {r.returncode}):")
+            print(f"  stderr: {r.stderr[:500]}")
+            print(f"  stdout: {r.stdout[:500]}")
+            return None
         out = r.stdout
         j_start, j_end = out.find("{"), out.rfind("}") + 1
         if j_start >= 0 and j_end > j_start:
             return json.loads(out[j_start:j_end])
+        print(f"  Could not parse output: {out[:500]}")
         return None
     finally:
         os.unlink(tmp_path)
@@ -77,6 +83,10 @@ def benchmark_cfr():
     r = run_solve(n_cpu, 200)
     if not r:
         print("  FAILED")
+        return None
+
+    if "solve_time_seconds" not in r:
+        print(f"  Solver error: {json.dumps(r, indent=2)}")
         return None
 
     t = r["solve_time_seconds"]
