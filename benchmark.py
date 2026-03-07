@@ -85,13 +85,20 @@ def benchmark_cfr():
         print("  FAILED")
         return None
 
-    if "solve_time_seconds" not in r:
+    # Handle both camelCase and snake_case keys
+    def get(key):
+        snake = key
+        camel = key.split("_")
+        camel = camel[0] + "".join(w.capitalize() for w in camel[1:])
+        return r.get(snake) or r.get(camel)
+
+    if not get("solve_time_seconds"):
         print(f"  Solver error: {json.dumps(r, indent=2)}")
         return None
 
-    t = r["solve_time_seconds"]
-    mem = r["memory_mb"]
-    expl = r["exploitability_percent"]
+    t = get("solve_time_seconds")
+    mem = get("memory_mb")
+    expl = get("exploitability_percent")
     print(f"  Solve time:   {t:.2f}s")
     print(f"  Memory:       {mem:.0f} MB")
     print(f"  Exploitability: {expl:.3f}%")
@@ -113,8 +120,8 @@ def benchmark_nn():
     try:
         import torch
         import torch.nn as nn
-    except ImportError:
-        print("\n[ NN TRAINING ] PyTorch not installed, skipping.")
+    except Exception as e:
+        print(f"\n[ NN TRAINING ] PyTorch import failed: {e}")
         return None
 
     # Pick best available device
